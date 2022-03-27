@@ -1,1 +1,1 @@
-# causal-eeg-vae
+# Causal outcomes from event evolutionary graphs with varionational autoencoders

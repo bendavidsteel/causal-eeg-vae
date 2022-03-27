@@ -1,0 +1,18 @@
+name: causal_eeg_vae
+channels:
+  - conda-forge
+  - pyg
+  - pytorch
+dependencies:
+  - python
+  - pandas
+  - matplotlib
+  - numpy
+  - pyg
+  - pytorch 
+  - torchvision 
+  - torchaudio 
+  - cpuonly
+  - pip
+  - pip:
+    - -e /home/ben/Projects/phd/repos/seldonite/.
