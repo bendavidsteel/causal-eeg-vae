@@ -3,6 +3,7 @@ channels:
   - conda-forge
   - pyg
   - pytorch
+  - huggingface
 dependencies:
   - python
   - pandas
@@ -12,7 +13,9 @@ dependencies:
   - pytorch 
   - torchvision 
   - torchaudio 
+  - torchtext
   - cpuonly
+  - transformers
   - pip
   - pip:
     - -e /home/ben/Projects/phd/repos/seldonite/.
