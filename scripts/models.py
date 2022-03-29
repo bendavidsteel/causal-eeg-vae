@@ -63,15 +63,19 @@ class GraphConditioner(torch.nn.Module):
         roberta_hidden_size = config.hidden_size
         self.embedding = transformers.RobertaModel.from_pretrained("roberta-base", config=config)
 
-        self.graph_layers = torch.nn.Sequential()
+        self.graph_layers = torch_geometric.nn.Sequential()
 
         for i, (in_size, out_size) in enumerate(zip([roberta_hidden_size] + graph_layer_sizes[:-1], graph_layer_sizes)):
-            self.graph_layers.add_module(name=f"L{i}", module=torch_geometric.nn.GCNConv(in_size, out_size))
+            self.graph_layers.add_module(name=f"L{i}", module=torch_geometric.nn.GATConv(in_size, out_size))
             self.graph_layers.add_module(name=f"A{i}", module=torch.nn.ReLU())
+
+        gate_nn = torch.nn.Linear(graph_layer_sizes[-1], 1)
+        self.pooling_layer = torch_geometric.nn.GlobalAttention(gate_nn)
 
     def forward(self, input):
         x = self.embedding(input.x)
-        return self.graph_layers(x, input.edge_index)
+        x = self.graph_layers(x, input.edge_index)
+        return self.pooling_layer(x)
 
 class Conditioner(torch.nn.Module):
 
@@ -107,6 +111,7 @@ class Encoder(torch.nn.Module):
         for i, (in_size, out_size) in enumerate(zip([input_embedding_size + context_embedding_size] + layer_sizes[:-1], layer_sizes)):
             self.MLP.add_module(name=f"L{i}", module=torch.nn.Linear(in_size, out_size))
             self.MLP.add_module(name=f"A{i}", module=torch.nn.ReLU())
+            self.MLP.add_module(name=f"D{i}", module=torch.nn.Dropout())
 
         self.linear_means = torch.nn.Linear(layer_sizes[-1], latent_size)
         self.linear_log_var = torch.nn.Linear(layer_sizes[-1], latent_size)
@@ -135,8 +140,9 @@ class Decoder(torch.nn.Module):
         self.MLP = torch.nn.Sequential()
 
         for i, (in_size, out_size) in enumerate(zip([latent_size + context_embedding_size] + layer_sizes, layer_sizes + [text_gen_hidden_size])):
-            self.MLP.add_module(name="L{:d}".format(i), module=torch.nn.Linear(in_size, out_size))
-            self.MLP.add_module(name="A{:d}".format(i), module=torch.nn.ReLU())
+            self.MLP.add_module(name=f"L{i}", module=torch.nn.Linear(in_size, out_size))
+            self.MLP.add_module(name=f"A{i}", module=torch.nn.ReLU())
+            self.MLP.add_module(name=f"D{i}", module=torch.nn.Dropout())
 
         self.text_gen = transformers.GPT2LMHeadModel.from_pretrained("gpt2", config=config)
 
