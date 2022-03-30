@@ -9,6 +9,7 @@ dependencies:
   - pandas
   - matplotlib
   - numpy
+  - nltk
   - pyg
   - pytorch 
   - torchvision 
