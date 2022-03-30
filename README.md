@@ -1,4 +1,4 @@
-# Causal outcomes from event evolutionary graphs with varionational autoencoders
+# Causal outcomes from event evolutionary graphs with variational autoencoders
 
 
 ## Credits
