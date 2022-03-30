@@ -18,4 +18,4 @@ dependencies:
   - transformers
   - pip
   - pip:
-    - -e /home/ben/Projects/phd/repos/seldonite/.
+    - -e ../seldonite/.

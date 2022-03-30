@@ -5,6 +5,7 @@ import torch
 import torchtext
 import torch_geometric.transforms as T
 from torch_geometric.datasets import Planetoid
+import transformers
 
 from scripts import cvae, models
 
@@ -73,16 +74,44 @@ def train(model, train_data, val_data):
         print(f'Epoch: {epoch:03d}, AUC: {auc:.4f}, AP: {ap:.4f}')
 
 
-def test(model, data):
+def test(model, data, device):
+
+    tokenizer = transformers.GPT2TokenizerFast.from_pretrained("gpt2")
+
+    bleu_scores = []
     model.eval()
     with torch.no_grad():
-        logits, recon_loss, means, log_var, z = model.encode(data.context)
+        for batch in data:
+            latent_size = model.latent_size
+            z = torch.nn.randn([1, latent_size]).to(device)
+            logits, recon_loss, means, log_var, z = model.encode(data.context, z=z)
 
-    
+            inferences = []
+            for logits_single in logits:
+                inference = tokenizer.convert_ids_to_tokens(logits_single)
+                inferences.append(inference)
 
-    torchtext.data.metrics.bleu_score(, max_n=2)
+            score = torchtext.data.metrics.bleu_score(inferences, batch.targets, max_n=2)
+            bleu_scores.append(score)
 
-    return model.test(z, data.pos_edge_label_index, data.neg_edge_label_index)
+    avg_bleu_score = sum(bleu_scores) / len(bleu_scores)
+    print(f"Average bleu score is {avg_bleu_score}")
+
+
+def gen(model, data, device):
+    tokenizer = transformers.GPT2TokenizerFast.from_pretrained("gpt2")
+
+    bleu_scores = []
+    model.eval()
+    with torch.no_grad():
+        for batch in data:
+            latent_size = model.latent_size
+            z = torch.nn.randn([1, latent_size]).to(device)
+            logits, recon_loss, means, log_var, z = model.encode(data.context, z=z)
+
+            inferences = tokenizer.batch_decode(logits)
+
+    print(inferences)
 
 
 def main(args):
@@ -98,14 +127,18 @@ def main(args):
 
     model = model.to(device)
 
-    train(model, train_data, val_data)
-    test(model, test_data)
+    if args.mode == 'train':
+        train(model, train_data, val_data)
+    elif args.mode == 'test':
+        test(model, test_data, device)
+    elif args.mode == 'gen':
+        gen(model, test_data, device)
 
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default='gcvae', choices=['gcvae', 'cvae'])
-    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test'])
+    parser.add_argument('--mode', type=str, default='train', choices=['train', 'test', 'gen'])
     args = parser.parse_args()
 
     main(args)
