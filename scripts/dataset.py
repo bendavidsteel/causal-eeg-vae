@@ -1,6 +1,7 @@
 
 import os
 
+import torch
 import torch_geometric
 
 class NewsDataset(torch_geometric.data.InMemoryDataset):
@@ -31,11 +32,9 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
         torch.save((data, slices), self.processed_paths[0])
 
 def load_and_preprocess_dataset(device):
-    transform = T.Compose([
-        T.NormalizeFeatures(),
-        T.ToDevice(device),
-        T.RandomLinkSplit(num_val=0.05, num_test=0.1, is_undirected=True,
-                        split_labels=True, add_negative_train_samples=False),
+    transform = torch_geometric.transforms.Compose([
+        torch_geometric.transforms.ToDevice(device),
+        torch_geometric.transforms.RandomNodeSplit(num_val=0.05, num_test=0.1),
     ])
     path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'data', 'Planetoid')
     dataset = Planetoid(path, args.dataset, transform=transform)
