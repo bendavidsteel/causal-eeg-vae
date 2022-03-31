@@ -1,5 +1,6 @@
 import argparse
-import os.path as osp
+import os
+from tabnanny import check
 
 import torch
 import torchtext
@@ -27,12 +28,15 @@ def kl_loss(mu, logstd):
     logstd = logstd.clamp(max=MAX_LOGSTD)
     return -0.5 * torch.mean(torch.sum(1 + 2 * logstd - mu**2 - logstd.exp()**2, dim=1))
 
-def train(model, train_data, val_data):
+def train(model, train_data, val_data, checkpoint_path, resume):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     model.train()
 
     min_val_loss = None
+
+    if resume:
+        model.load_state_dict(torch.load(os.path.join(checkpoint_path, 'best_model.pt')))
 
     for epoch in range(MAX_EPOCHS):
 
@@ -62,6 +66,7 @@ def train(model, train_data, val_data):
         # save best model so far
         if val_loss < min_val_loss:
             # checkpoint model
+            torch.save(model.state_dict(), os.path.join(checkpoint_path, 'best_model.pt'))
 
             epochs_since_best = 0
         else:
