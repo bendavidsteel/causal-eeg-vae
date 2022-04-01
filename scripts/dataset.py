@@ -1,4 +1,6 @@
-
+import collections
+from contextvars import Context
+import copy
 import os
 
 import networkx as nx
@@ -13,6 +15,8 @@ NUM_SENTENCES = 5
 MAX_TOKENS = 200
 MAX_TOP_PREDECESSORS = 3
 NUM_GENERATIONS = 3
+
+ContextTargetData = collections.namedtuple('ContextTargetData', ['target', 'context'])
 
 def get_top_n_predecessors(graph, node, n):
     predecessors = graph.predecessors(node)
@@ -52,26 +56,33 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
         self.targets = torch.load(target_save_path)
         self.contexts = torch.save(context_save_path)
 
+    def len(self):
+        return len(self.targets)
+
     def get(self, idx: int):
-        if self.len() == 1:
-            return copy.copy(self.data)
 
-        if not hasattr(self, '_data_list') or self._data_list is None:
-            self._data_list = self.len() * [None]
-        elif self._data_list[idx] is not None:
-            return copy.copy(self._data_list[idx])
+        if self.graph_context:
+            graph_data, graph_slices = self.contexts
+            target = self.targets[idx]
 
-        data = separate(
-            cls=self.data.__class__,
-            batch=self.data,
-            idx=idx,
-            slice_dict=self.slices,
-            decrement=False,
-        )
+            if not hasattr(self, '_data_list') or self._data_list is None:
+                self._data_list = self.len() * [None]
+            elif self._data_list[idx] is not None:
+                return ContextTargetData(target, copy.copy(self._data_list[idx]))
 
-        self._data_list[idx] = copy.copy(data)
+            graph_context = torch_geometric.data.separate(
+                cls=graph_data.__class__,
+                batch=graph_data,
+                idx=idx,
+                slice_dict=graph_slices,
+                decrement=False,
+            )
 
-        return data
+            self._data_list[idx] = copy.copy(graph_context)
+
+            return ContextTargetData(target, graph_context)
+        else:
+            return ContextTargetData(self.targets[idx], self.contexts[idx])
 
     @property
     def raw_file_names(self):
