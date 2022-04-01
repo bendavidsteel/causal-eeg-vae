@@ -1,15 +1,15 @@
 import collections
-from contextvars import Context
 import copy
 import os
 
 import networkx as nx
-import ntlk
+import nltk
 import numpy as np
 import pandas as pd
 import torch
 import torch_geometric
 import transformers
+import tqdm
 
 NUM_SENTENCES = 5
 MAX_TOKENS = 200
@@ -43,12 +43,11 @@ def get_n_gen_ancestors(graph, node, num_gens, num_predecessors):
 
 class NewsDataset(torch_geometric.data.InMemoryDataset):
     def __init__(self, root, dataset_name='main', graph_context=True, transform=None, pre_transform=None, pre_filter=None):
-
         self.dataset_name = dataset_name
         self.graph_context = graph_context
         self.num_data_points = 0
 
-        self._process()
+        super().__init__(root, transform, pre_transform, pre_filter)
 
         context_save_path = os.path.join(self.processed_dir, 'contexts.pt')
         target_save_path = os.path.join(self.processed_dir, 'targets.pt')
@@ -92,7 +91,7 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
     def processed_file_names(self):
         return ['news_entity_dag.pt']
 
-    def _process(self):
+    def process(self):
 
         # load graph from file
         nodes_df = pd.read_csv(os.path.join(self.raw_dir, f"{self.dataset_name}_entity_dag_nodes.csv"))
@@ -102,22 +101,24 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
         roberta_tokenizer = transformers.RobertaTokenizerFast.from_pretrained("roberta-base")
 
-        node_idx = 0
         node_mapping = {}
         # add nodes from dataframe
-        for node_row in nodes_df.iterrows():
-            node_mapping[node_row['id']] = node_idx
+        print('Loading nodes into graph')
+        for idx, node_row in tqdm.tqdm(nodes_df.iterrows()):
+            node_mapping[node_row['id']] = idx
+
+            if node_row['text'] is not str or node_row['title'] is not str:
+                continue
 
             first_sentences = ' '.join(nltk.tokenize.sent_tokenize(node_row['text'])[:NUM_SENTENCES - 1])
             node_text = node_row['title'] + '. ' + first_sentences
             node_token_ids = roberta_tokenizer.encode(node_text, padding='max_length', max_length=MAX_TOKENS)
 
-            graph.add_node(node_idx, token_ids=node_token_ids)
-
-            node_idx += 1
+            graph.add_node(idx, token_ids=node_token_ids)
 
         # add edges from dataframe
-        for edge_row in edges_df.iterrows():
+        print('Loading edges into graph')
+        for idx, edge_row in tqdm.tqdm(edges_df.iterrows()):
             old_id = node_mapping[edge_row['old_id']]
             new_id = node_mapping[edge_row['new_id']]
 
@@ -131,11 +132,12 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
         # process network into torch compat shape
         num_data_points = 0
-        for node in graph.nodes():
+        print('Create context/target pairs from graph')
+        for node, token_ids in tqdm.tqdm(graph.nodes(data='token_ids')):
             if graph.in_degree(node) == 0:
                 continue
 
-            target = torch.tensor(graph[node]['token_ids'])
+            target = torch.tensor(token_ids)
             targets.append(target)
 
             if self.graph_context:
@@ -182,11 +184,19 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
             torch.save(contexts, context_save_path)
 
 
-def load_and_preprocess_dataset(dataset_name, device):
-    transform = torch_geometric.transforms.Compose([
-        torch_geometric.transforms.ToDevice(device),
-    ])
+def load_and_preprocess_dataset(model, dataset_name):
     path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'data', dataset_name)
-    dataset = NewsDataset(path, dataset_name, transform=transform)
+    graph_context = model == 'gcvae'
 
-    return dataset[0]
+    dataset = NewsDataset(path, dataset_name, graph_context=graph_context)
+
+    train_size = int(0.8 * len(dataset))
+    val_size = int(0.1 * len(dataset))
+    test_size = len(dataset) - train_size - val_size
+    train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, val_size, test_size])
+
+    train_dataloader = torch.utils.data.DataLoader(train_dataset)
+    val_dataloader = torch.utils.data.DataLoader(val_dataset)
+    test_dataloader = torch.utils.data.DataLoader(test_dataset)
+
+    return train_dataloader, val_dataloader, test_dataloader
