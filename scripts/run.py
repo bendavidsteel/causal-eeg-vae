@@ -40,10 +40,12 @@ def train(model, train_data, val_data, device, checkpoint_path, resume):
         # train on training set
         train_loss = 0
         for batch in train_data:
-            batch = batch.to(device)
+            context = batch[0].to(device)
+            target = batch[1].to(device)
+
             optimizer.zero_grad()
 
-            logits, recon_loss, means, log_var, z = model(batch.context, x=batch.target)
+            logits, recon_loss, means, log_var, z = model(context, x=target)
             loss = recon_loss + kl_loss(means, log_var)
             loss.backward()
             optimizer.step()
@@ -52,9 +54,11 @@ def train(model, train_data, val_data, device, checkpoint_path, resume):
         # trail on validation set
         val_loss = 0
         for batch in val_data:
-            batch = batch.to(device)
+            context = batch[0].to(device)
+            target = batch[1].to(device)
+
             with torch.no_grad():
-                logits, recon_loss, means, log_var, z = model(batch.context, x=batch.target)
+                logits, recon_loss, means, log_var, z = model(context, x=target)
             loss = recon_loss + kl_loss(means, log_var)
 
             val_loss += float(loss)
@@ -86,18 +90,19 @@ def test(model, data, device):
     model.eval()
     with torch.no_grad():
         for batch in data:
-            batch = batch.to(device)
+            context = batch[0].to(device)
+            target = batch[1].to(device)
             latent_size = model.latent_size
             z = torch.nn.randn([1, latent_size]).to(device)
-            logits, recon_loss, means, log_var, z = model.encode(batch.context, z=z)
+            logits, recon_loss, means, log_var, z = model.encode(context, z=z)
 
             inferences = []
             for logits_single in logits:
                 inference = tokenizer.convert_ids_to_tokens(logits_single)
                 inferences.append(inference)
 
-            for target, inference in zip(batch.target, inference):
-                score = nltk.translate.bleu_score.sentence_bleu([batch.target], inferences, weights=[0.5, 0.5])
+            for target, inference in zip(target, inference):
+                score = nltk.translate.bleu_score.sentence_bleu([target], inferences, weights=[0.5, 0.5])
                 bleu_scores.append(score)
 
     avg_bleu_score = sum(bleu_scores) / len(bleu_scores)
@@ -127,15 +132,19 @@ def main(args):
 
     train_data, val_data, test_data = dataset.load_and_preprocess_dataset(args.model, args.dataset)
 
+    encoder_layer_sizes = [256, 256]
+    latent_size = 16
+    decoder_layer_sizes = [256, 256]
+    conditioner_layer_sizes = [256, 256, 256]
     if args.model == 'gcvae':
-        model = models.GCVAE()
+        model = models.GCVAE(encoder_layer_sizes, latent_size, decoder_layer_sizes, conditioner_layer_sizes)
     elif args.model == 'cvae':
-        model = models.CVAE()
+        model = models.CVAE(encoder_layer_sizes, latent_size, decoder_layer_sizes, conditioner_layer_sizes)
 
     model = model.to(device)
 
     if args.mode == 'train':
-        train(model, train_data, val_data, device)
+        train(model, train_data, val_data, device, args.checkpoint_path, args.resume)
     elif args.mode == 'test':
         test(model, test_data, device)
     elif args.mode == 'gen':
@@ -147,6 +156,8 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, default='gcvae', choices=['gcvae', 'cvae'])
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test', 'gen'])
     parser.add_argument('--dataset', type=str)
+    parser.add_argument('--checkpoint-path', type=str)
+    parser.add_argument('--resume', type=bool)
     args = parser.parse_args()
 
     main(args)

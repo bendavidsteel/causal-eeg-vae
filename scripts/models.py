@@ -12,9 +12,11 @@ class BaseCVAE(torch.nn.Module):
         assert type(latent_size) == int
         assert type(decoder_layer_sizes) == list
 
+        context_embedding_size = conditioner_layer_sizes[-1]
+
         self.latent_size = latent_size
-        self.encoder = Encoder(encoder_layer_sizes, latent_size)
-        self.decoder = Decoder(decoder_layer_sizes, latent_size)
+        self.encoder = Encoder(encoder_layer_sizes, latent_size, context_embedding_size)
+        self.decoder = Decoder(decoder_layer_sizes, latent_size, context_embedding_size)
 
     def forward(self, y, z=None, x=None):
 
@@ -63,18 +65,20 @@ class GraphConditioner(torch.nn.Module):
         roberta_hidden_size = config.hidden_size
         self.embedding = transformers.RobertaModel.from_pretrained("roberta-base", config=config)
 
-        self.graph_layers = torch_geometric.nn.Sequential()
+        graph_layers = []
 
         for i, (in_size, out_size) in enumerate(zip([roberta_hidden_size] + graph_layer_sizes[:-1], graph_layer_sizes)):
-            self.graph_layers.add_module(name=f"L{i}", module=torch_geometric.nn.GATConv(in_size, out_size))
-            self.graph_layers.add_module(name=f"A{i}", module=torch.nn.ReLU())
+            graph_layers.append((torch_geometric.nn.GATConv(in_size, out_size), 'x, edge_index -> x'))
+            graph_layers.append((torch.nn.ReLU(inplace=True)))
+
+        self.graph_sequential_model = torch_geometric.nn.Sequential('x, edge_index', graph_layers)
 
         gate_nn = torch.nn.Linear(graph_layer_sizes[-1], 1)
         self.pooling_layer = torch_geometric.nn.GlobalAttention(gate_nn)
 
     def forward(self, input):
         x = self.embedding(input.x)
-        x = self.graph_layers(x, input.edge_index)
+        x = self.graph_sequential_model(x, input.edge_index)
         return self.pooling_layer(x)
 
 class Conditioner(torch.nn.Module):
@@ -98,7 +102,7 @@ class Conditioner(torch.nn.Module):
 
 class Encoder(torch.nn.Module):
 
-    def __init__(self, layer_sizes, latent_size, context_embedding_size, num_labels):
+    def __init__(self, layer_sizes, latent_size, context_embedding_size):
 
         super().__init__()
 
@@ -131,7 +135,7 @@ class Encoder(torch.nn.Module):
 
 class Decoder(torch.nn.Module):
 
-    def __init__(self, layer_sizes, latent_size, context_embedding_size, num_labels):
+    def __init__(self, layer_sizes, latent_size, context_embedding_size):
         super().__init__()
 
         config = transformers.GPT2Config.from_pretrained("gpt2")
