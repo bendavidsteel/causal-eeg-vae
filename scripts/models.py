@@ -2,6 +2,7 @@ import torch
 import torch_geometric
 import transformers
 
+import gpt2
 
 class BaseCVAE(torch.nn.Module):
 
@@ -144,13 +145,13 @@ class Decoder(torch.nn.Module):
             self.MLP.add_module(name=f"A{i}", module=torch.nn.ReLU())
             self.MLP.add_module(name=f"D{i}", module=torch.nn.Dropout())
 
-        self.text_gen = transformers.GPT2LMHeadModel.from_pretrained("gpt2", config=config)
+        self.text_gen = gpt2.GPT2LMHeadModel.from_pretrained("gpt2", config=config)
 
     def forward(self, z, c):
         z = torch.cat((z, c), dim=-1)
 
         x = self.MLP(z)
 
-        output = self.text_gen(encoder_hidden_states=x)
+        output = self.text_gen(latent_z=x)
 
         return output.logits, output.loss
