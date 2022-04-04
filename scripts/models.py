@@ -18,15 +18,15 @@ class BaseCVAE(torch.nn.Module):
         self.encoder = Encoder(encoder_layer_sizes, latent_size, context_embedding_size)
         self.decoder = Decoder(decoder_layer_sizes, latent_size, context_embedding_size)
 
-    def forward(self, y, z=None, x=None):
+    def forward(self, condition, inference_start_tokens, z=None, target=None):
 
-        if z and not x:
-            return self.inference(z, y)
+        if z and not target:
+            return self.inference(z, condition)
 
-        y = self.conditioner(y)
-        means, log_var = self.encoder(x, y)
+        condition = self.conditioner(condition)
+        means, log_var = self.encoder(target, condition)
         z = self.reparameterize(means, log_var)
-        logits, loss = self.decoder(z, y)
+        logits, loss = self.decoder(z, condition)
 
         return logits, loss, means, log_var, z
 
@@ -77,7 +77,9 @@ class GraphConditioner(torch.nn.Module):
         self.pooling_layer = torch_geometric.nn.GlobalAttention(gate_nn)
 
     def forward(self, input):
-        x = self.embedding(input.x)
+        output = self.embedding(input.x)
+        # get last hidden state at end of sequence
+        x = output.last_hidden_state[:,-1,:]
         x = self.graph_sequential_model(x, input.edge_index)
         return self.pooling_layer(x)
 
@@ -121,7 +123,9 @@ class Encoder(torch.nn.Module):
         self.linear_log_var = torch.nn.Linear(layer_sizes[-1], latent_size)
 
     def forward(self, x, c):
-        x = self.embedding(x)
+        output = self.embedding(x)
+        # get last hidden state at end of sequence
+        x = output.last_hidden_state[:,-1,:]
 
         x = torch.cat((x, c), dim=-1)
 
@@ -150,7 +154,7 @@ class Decoder(torch.nn.Module):
 
         self.text_gen = transformers.GPT2LMHeadModel.from_pretrained("gpt2", config=config)
 
-    def forward(self, z, c):
+    def forward(self, z, c, ):
         z = torch.cat((z, c), dim=-1)
 
         x = self.MLP(z)

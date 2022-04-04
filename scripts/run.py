@@ -42,10 +42,11 @@ def train(model, train_data, val_data, device, checkpoint_path, resume):
         for batch in train_data:
             context = batch[0].to(device)
             target = batch[1].to(device)
+            inference_start = torch.tensor([], dtype='long').to(device)
 
             optimizer.zero_grad()
 
-            logits, recon_loss, means, log_var, z = model(context, x=target)
+            logits, recon_loss, means, log_var, z = model(context, inference_start, target=target)
             loss = recon_loss + kl_loss(means, log_var)
             loss.backward()
             optimizer.step()
@@ -56,9 +57,10 @@ def train(model, train_data, val_data, device, checkpoint_path, resume):
         for batch in val_data:
             context = batch[0].to(device)
             target = batch[1].to(device)
+            inference_start = torch.tensor([], dtype='long').to(device)
 
             with torch.no_grad():
-                logits, recon_loss, means, log_var, z = model(context, x=target)
+                logits, recon_loss, means, log_var, z = model(context, inference_start, target=target)
             loss = recon_loss + kl_loss(means, log_var)
 
             val_loss += float(loss)
@@ -92,9 +94,11 @@ def test(model, data, device):
         for batch in data:
             context = batch[0].to(device)
             target = batch[1].to(device)
+            inference_start = torch.tensor([], dtype='long').to(device)
+
             latent_size = model.latent_size
             z = torch.nn.randn([1, latent_size]).to(device)
-            logits, recon_loss, means, log_var, z = model.encode(context, z=z)
+            logits, recon_loss, means, log_var, z = model.encode(context, inference_start, z=z)
 
             inferences = []
             for logits_single in logits:
@@ -116,10 +120,13 @@ def gen(model, data, device):
     model.eval()
     with torch.no_grad():
         for batch in data:
-            batch = batch.to(device)
+            context = batch[0].to(device)
+            target = batch[1].to(device)
+            inference_start = torch.tensor([], dtype='long').to(device)
+
             latent_size = model.latent_size
             z = torch.nn.randn([1, latent_size]).to(device)
-            logits, recon_loss, means, log_var, z = model.encode(batch.context, z=z)
+            logits, recon_loss, means, log_var, z = model.encode(context, inference_start, z=z, target=target)
 
             inferences = tokenizer.batch_decode(logits)
 
@@ -130,7 +137,7 @@ def main(args):
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    train_data, val_data, test_data = dataset.load_and_preprocess_dataset(args.model, args.dataset)
+    train_data, val_data, test_data = dataset.load_and_preprocess_dataset(args.model, args.dataset, args.batch_size)
 
     encoder_layer_sizes = [256, 256]
     latent_size = 16
@@ -158,6 +165,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str)
     parser.add_argument('--checkpoint-path', type=str)
     parser.add_argument('--resume', type=bool)
+    parser.add_argument('--batch-size', type=int, default=32)
     args = parser.parse_args()
 
     main(args)

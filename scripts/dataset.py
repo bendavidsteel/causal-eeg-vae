@@ -181,7 +181,7 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
             torch.save(contexts, context_save_path)
 
 
-def load_and_preprocess_dataset(model, dataset_name):
+def load_and_preprocess_dataset(model, dataset_name, batch_size):
     path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'data', dataset_name)
     graph_context = model == 'gcvae'
 
@@ -192,8 +192,8 @@ def load_and_preprocess_dataset(model, dataset_name):
     test_size = len(dataset) - train_size - val_size
     train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, val_size, test_size])
 
-    train_dataloader = torch_geometric.loader.DataLoader(train_dataset, batch_size=32)
-    val_dataloader = torch_geometric.loader.DataLoader(val_dataset, batch_size=32)
-    test_dataloader = torch_geometric.loader.DataLoader(test_dataset, batch_size=32)
+    train_dataloader = torch_geometric.loader.DataLoader(train_dataset, batch_size=batch_size)
+    val_dataloader = torch_geometric.loader.DataLoader(val_dataset, batch_size=batch_size)
+    test_dataloader = torch_geometric.loader.DataLoader(test_dataset, batch_size=batch_size)
 
     return train_dataloader, val_dataloader, test_dataloader
