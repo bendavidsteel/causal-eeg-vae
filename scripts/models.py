@@ -13,19 +13,21 @@ class BaseCVAE(torch.nn.Module):
         assert type(latent_size) == int
         assert type(decoder_layer_sizes) == list
 
+        context_embedding_size = conditioner_layer_sizes[-1]
+
         self.latent_size = latent_size
-        self.encoder = Encoder(encoder_layer_sizes, latent_size)
-        self.decoder = Decoder(decoder_layer_sizes, latent_size)
+        self.encoder = Encoder(encoder_layer_sizes, latent_size, context_embedding_size)
+        self.decoder = Decoder(decoder_layer_sizes, latent_size, context_embedding_size)
 
-    def forward(self, y, z=None, x=None):
+    def forward(self, condition, inference_start_tokens, z=None, target=None):
 
-        if z and not x:
-            return self.inference(z, y)
+        if z and not target:
+            return self.inference(z, condition)
 
-        y = self.conditioner(y)
-        means, log_var = self.encoder(x, y)
+        condition = self.conditioner(condition)
+        means, log_var = self.encoder(target, condition)
         z = self.reparameterize(means, log_var)
-        logits, loss = self.decoder(z, y)
+        logits, loss = self.decoder(z, condition)
 
         return logits, loss, means, log_var, z
 
@@ -64,18 +66,22 @@ class GraphConditioner(torch.nn.Module):
         roberta_hidden_size = config.hidden_size
         self.embedding = transformers.RobertaModel.from_pretrained("roberta-base", config=config)
 
-        self.graph_layers = torch_geometric.nn.Sequential()
+        graph_layers = []
 
         for i, (in_size, out_size) in enumerate(zip([roberta_hidden_size] + graph_layer_sizes[:-1], graph_layer_sizes)):
-            self.graph_layers.add_module(name=f"L{i}", module=torch_geometric.nn.GATConv(in_size, out_size))
-            self.graph_layers.add_module(name=f"A{i}", module=torch.nn.ReLU())
+            graph_layers.append((torch_geometric.nn.GATConv(in_size, out_size), 'x, edge_index -> x'))
+            graph_layers.append((torch.nn.ReLU(inplace=True)))
+
+        self.graph_sequential_model = torch_geometric.nn.Sequential('x, edge_index', graph_layers)
 
         gate_nn = torch.nn.Linear(graph_layer_sizes[-1], 1)
         self.pooling_layer = torch_geometric.nn.GlobalAttention(gate_nn)
 
     def forward(self, input):
-        x = self.embedding(input.x)
-        x = self.graph_layers(x, input.edge_index)
+        output = self.embedding(input.x)
+        # get last hidden state at end of sequence
+        x = output.last_hidden_state[:,-1,:]
+        x = self.graph_sequential_model(x, input.edge_index)
         return self.pooling_layer(x)
 
 class Conditioner(torch.nn.Module):
@@ -99,7 +105,7 @@ class Conditioner(torch.nn.Module):
 
 class Encoder(torch.nn.Module):
 
-    def __init__(self, layer_sizes, latent_size, context_embedding_size, num_labels):
+    def __init__(self, layer_sizes, latent_size, context_embedding_size):
 
         super().__init__()
 
@@ -118,7 +124,9 @@ class Encoder(torch.nn.Module):
         self.linear_log_var = torch.nn.Linear(layer_sizes[-1], latent_size)
 
     def forward(self, x, c):
-        x = self.embedding(x)
+        output = self.embedding(x)
+        # get last hidden state at end of sequence
+        x = output.last_hidden_state[:,-1,:]
 
         x = torch.cat((x, c), dim=-1)
 
@@ -132,7 +140,7 @@ class Encoder(torch.nn.Module):
 
 class Decoder(torch.nn.Module):
 
-    def __init__(self, layer_sizes, latent_size, context_embedding_size, num_labels):
+    def __init__(self, layer_sizes, latent_size, context_embedding_size):
         super().__init__()
 
         config = transformers.GPT2Config.from_pretrained("gpt2")
@@ -147,7 +155,7 @@ class Decoder(torch.nn.Module):
 
         self.text_gen = gpt2.GPT2LMHeadModel.from_pretrained("gpt2", config=config)
 
-    def forward(self, z, c):
+    def forward(self, z, c, ):
         z = torch.cat((z, c), dim=-1)
 
         x = self.MLP(z)

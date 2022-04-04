@@ -1,14 +1,11 @@
 import argparse
 import os
-from tabnanny import check
 
+import nltk
 import torch
-import torchtext
-import torch_geometric.transforms as T
-from torch_geometric.datasets import Planetoid
 import transformers
 
-from scripts import cvae, models
+import models, dataset
 
 MAX_LOGSTD = 10
 MAX_EPOCHS = 1000
@@ -28,7 +25,7 @@ def kl_loss(mu, logstd):
     logstd = logstd.clamp(max=MAX_LOGSTD)
     return -0.5 * torch.mean(torch.sum(1 + 2 * logstd - mu**2 - logstd.exp()**2, dim=1))
 
-def train(model, train_data, val_data, checkpoint_path, resume):
+def train(model, train_data, val_data, device, checkpoint_path, resume):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
     model.train()
@@ -43,9 +40,13 @@ def train(model, train_data, val_data, checkpoint_path, resume):
         # train on training set
         train_loss = 0
         for batch in train_data:
+            context = batch[0].to(device)
+            target = batch[1].to(device)
+            inference_start = torch.tensor([], dtype='long').to(device)
+
             optimizer.zero_grad()
 
-            logits, recon_loss, means, log_var, z = model(train_data.context, x=train_data.targets)
+            logits, recon_loss, means, log_var, z = model(context, inference_start, target=target)
             loss = recon_loss + kl_loss(means, log_var)
             loss.backward()
             optimizer.step()
@@ -53,9 +54,13 @@ def train(model, train_data, val_data, checkpoint_path, resume):
 
         # trail on validation set
         val_loss = 0
-        for batch_idx, batch in enumerate(val_data):
+        for batch in val_data:
+            context = batch[0].to(device)
+            target = batch[1].to(device)
+            inference_start = torch.tensor([], dtype='long').to(device)
+
             with torch.no_grad():
-                logits, recon_loss, means, log_var, z = model(train_data.context, x=train_data.targets)
+                logits, recon_loss, means, log_var, z = model(context, inference_start, target=target)
             loss = recon_loss + kl_loss(means, log_var)
 
             val_loss += float(loss)
@@ -87,17 +92,22 @@ def test(model, data, device):
     model.eval()
     with torch.no_grad():
         for batch in data:
+            context = batch[0].to(device)
+            target = batch[1].to(device)
+            inference_start = torch.tensor([], dtype='long').to(device)
+
             latent_size = model.latent_size
             z = torch.nn.randn([1, latent_size]).to(device)
-            logits, recon_loss, means, log_var, z = model.encode(data.context, z=z)
+            logits, recon_loss, means, log_var, z = model.encode(context, inference_start, z=z)
 
             inferences = []
             for logits_single in logits:
                 inference = tokenizer.convert_ids_to_tokens(logits_single)
                 inferences.append(inference)
 
-            score = torchtext.data.metrics.bleu_score(inferences, batch.targets, max_n=2)
-            bleu_scores.append(score)
+            for target, inference in zip(target, inference):
+                score = nltk.translate.bleu_score.sentence_bleu([target], inferences, weights=[0.5, 0.5])
+                bleu_scores.append(score)
 
     avg_bleu_score = sum(bleu_scores) / len(bleu_scores)
     print(f"Average bleu score is {avg_bleu_score}")
@@ -110,9 +120,13 @@ def gen(model, data, device):
     model.eval()
     with torch.no_grad():
         for batch in data:
+            context = batch[0].to(device)
+            target = batch[1].to(device)
+            inference_start = torch.tensor([], dtype='long').to(device)
+
             latent_size = model.latent_size
             z = torch.nn.randn([1, latent_size]).to(device)
-            logits, recon_loss, means, log_var, z = model.encode(data.context, z=z)
+            logits, recon_loss, means, log_var, z = model.encode(context, inference_start, z=z, target=target)
 
             inferences = tokenizer.batch_decode(logits)
 
@@ -123,17 +137,21 @@ def main(args):
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    train_data, val_data, test_data = load_and_preprocess_dataset(device, train=True)
+    train_data, val_data, test_data = dataset.load_and_preprocess_dataset(args.model, args.dataset, args.batch_size)
 
+    encoder_layer_sizes = [256, 256]
+    latent_size = 16
+    decoder_layer_sizes = [256, 256]
+    conditioner_layer_sizes = [256, 256, 256]
     if args.model == 'gcvae':
-        model = models.GCVAE()
+        model = models.GCVAE(encoder_layer_sizes, latent_size, decoder_layer_sizes, conditioner_layer_sizes)
     elif args.model == 'cvae':
-        model = models.CVAE()
+        model = models.CVAE(encoder_layer_sizes, latent_size, decoder_layer_sizes, conditioner_layer_sizes)
 
     model = model.to(device)
 
     if args.mode == 'train':
-        train(model, train_data, val_data)
+        train(model, train_data, val_data, device, args.checkpoint_path, args.resume)
     elif args.mode == 'test':
         test(model, test_data, device)
     elif args.mode == 'gen':
@@ -144,6 +162,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', type=str, default='gcvae', choices=['gcvae', 'cvae'])
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test', 'gen'])
+    parser.add_argument('--dataset', type=str)
+    parser.add_argument('--checkpoint-path', type=str)
+    parser.add_argument('--resume', type=bool)
+    parser.add_argument('--batch-size', type=int, default=32)
     args = parser.parse_args()
 
     main(args)
