@@ -50,24 +50,26 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
         super().__init__(root, transform, pre_transform, pre_filter)
 
-        context_save_path = os.path.join(self.processed_dir, 'contexts.pt')
-        target_save_path = os.path.join(self.processed_dir, 'targets.pt')
+        data_save_path = os.path.join(self.processed_dir, 'data.pt')
+        graph_data_save_path = os.path.join(self.processed_dir, 'graph_data.pt')
 
-        self.targets = torch.load(target_save_path)
-        self.contexts = torch.load(context_save_path)
+        self.data_list = torch.load(data_save_path)
+        self.graph_data = torch.load(graph_data_save_path)
 
     def len(self):
-        return len(self.targets)
+        return len(self.data_list)
 
     def get(self, idx: int):
 
         if self.graph_context:
-            graph_data, graph_slices = self.contexts
+            graph_data, graph_slices = self.graph_data
             
-            if not hasattr(self, '_data_list') or self._data_list is None:
-                self._data_list = self.len() * [None]
-            elif self._data_list[idx] is not None:
-                return copy.copy(self._data_list[idx]), self.targets[idx]
+            if not hasattr(self, '_graph_data_list') or self._graph_data_list is None:
+                self._graph_data_list = self.len() * [None]
+            elif self._graph_data_list[idx] is not None:
+                data = copy.copy(self.data_list[idx])
+                data['conditioner_graph'] = copy.copy(self._graph_data_list[idx])
+                return data
 
             graph_context = torch_geometric.data.separate.separate(
                 cls=graph_data.__class__,
@@ -77,11 +79,13 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
                 decrement=False,
             )
 
-            self._data_list[idx] = copy.copy(graph_context)
+            self._graph_data_list[idx] = copy.copy(graph_context)
 
-            return graph_context, self.targets[idx]
+            data = copy.copy(self.data_list[idx])
+            data['conditioner_graph'] = copy.copy(self._graph_data_list[idx])
+            return data
         else:
-            return self.contexts[idx], self.targets[idx]
+            return copy.copy(self.data_list[idx])
 
     @property
     def raw_file_names(self):
@@ -89,7 +93,7 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
     @property
     def processed_file_names(self):
-        return ['contexts.pt', 'targets.pt']
+        return ['data.pt', 'graph_data.pt']
 
     def process(self):
 
@@ -103,22 +107,30 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
         graph = nx.DiGraph()
 
         roberta_tokenizer = transformers.RobertaTokenizerFast.from_pretrained("roberta-base")
+        gpt2_tokenizer = transformers.GPT2TokenizerFast.from_pretrained("gpt2")
+        # set pad_token_id to unk_token_id -> be careful here as unk_token_id == eos_token_id == bos_token_id
+        gpt2_tokenizer.pad_token = gpt2_tokenizer.unk_token
 
         node_mapping = {}
         # add nodes from dataframe
         print('Loading nodes into graph')
-        for idx, node_row in tqdm.tqdm(nodes_df.iterrows()):
+        for idx, node_row in tqdm.tqdm(nodes_df.iterrows(), total=len(nodes_df)):
             node_mapping[node_row['id']] = idx
 
             first_sentences = ' '.join(nltk.tokenize.sent_tokenize(node_row['text'])[:NUM_SENTENCES - 1])
             node_text = node_row['title'] + '. ' + first_sentences
-            node_token_ids = roberta_tokenizer.encode(node_text, padding='max_length', truncation='longest_first', max_length=MAX_TOKENS)
+            roberta_tokens = roberta_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
+            gpt2_tokens = gpt2_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
 
-            graph.add_node(idx, token_ids=node_token_ids)
+            graph.add_node(idx, 
+                           roberta_input_ids=roberta_tokens.input_ids,
+                           roberta_attention_mask=roberta_tokens.attention_mask,
+                           gpt2_input_ids=gpt2_tokens.input_ids,
+                           gpt2_attention_mask=gpt2_tokens.attention_mask)
 
         # add edges from dataframe
         print('Loading edges into graph')
-        for idx, edge_row in tqdm.tqdm(edges_df.iterrows()):
+        for idx, edge_row in tqdm.tqdm(edges_df.iterrows(), total=len(edges_df)):
             if edge_row['old_id'] not in node_mapping or edge_row['new_id'] not in node_mapping:
                 continue
 
@@ -130,17 +142,23 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
             else:
                 graph.add_edge(old_id, new_id, entities=1)
 
-        contexts = []
-        targets = []
+        data_list = []
+        graph_data_list = []
 
         # process network into torch compat shape
         print('Create context/target pairs from graph')
-        for node, token_ids in tqdm.tqdm(graph.nodes(data='token_ids')):
+        for node, tokens in tqdm.tqdm(graph.nodes(data=True), total=graph.number_of_nodes()):
             if graph.in_degree(node) == 0:
                 continue
 
-            target = torch.tensor(token_ids, dtype=torch.long)
-            targets.append(target)
+            data = {}
+
+            data['target_input_ids'] = torch.tensor(tokens['roberta_input_ids'], dtype=torch.long)
+            data['target_attention_mask'] = torch.tensor(tokens['roberta_attention_mask'], dtype=torch.long)
+
+            context_node = get_top_n_predecessors(graph, node, 1)[0]
+            data['decoder_input_ids'] = torch.tensor(graph.nodes[context_node]['gpt2_input_ids'])
+            data['decoder_attention_mask'] = torch.tensor(graph.nodes[context_node]['gpt2_attention_mask'])
 
             if self.graph_context:
                 ancestors = get_n_gen_ancestors(graph, node, NUM_GENERATIONS, MAX_TOP_PREDECESSORS)
@@ -148,10 +166,12 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
                 num_nodes = len(graph_context)
                 node_token_ids = np.zeros((num_nodes, MAX_TOKENS))
+                node_attention_mask = np.zeros((num_nodes, MAX_TOKENS))
 
                 node_map = {}
-                for node_idx, (context_node, context_token_ids) in enumerate(graph_context.nodes(data='token_ids')):
-                    node_token_ids[node_idx, :] = context_token_ids
+                for node_idx, (context_node, context_tokens) in enumerate(graph_context.nodes(data=True)):
+                    node_token_ids[node_idx, :] = context_tokens['roberta_input_ids']
+                    node_attention_mask[node_idx, :] = context_tokens['roberta_attention_mask']
 
                     node_map[context_node] = node_idx
 
@@ -159,26 +179,28 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
                 for (node_1, node_2) in graph_context.edges():
                     edges.append([node_map[node_1], node_map[node_2]])
                 
-                context = torch_geometric.data.Data(
-                    x = torch.tensor(node_token_ids, dtype=torch.long),
+                graph_context = torch_geometric.data.Data(
+                    input_ids = torch.tensor(node_token_ids, dtype=torch.long),
+                    attention_mask = torch.tensor(node_attention_mask, dtype=torch.long),
                     edge_index = torch.tensor(edges, dtype=torch.long).T
                 )
 
+                graph_data_list.append(graph_context)
+
             else:
-                context_node = get_top_n_predecessors(graph, node, 1)[0]
-                context = torch.tensor(graph[context_node]['token_ids'])
+                data['conditioner_input_ids'] = torch.tensor(graph[context_node]['roberta_input_ids'])
+                data['conditioner_attention_mask'] = torch.tensor(graph[context_node]['roberta_attention_mask'])
 
-            contexts.append(context)
+            data_list.append(data)
 
-        context_save_path = os.path.join(self.processed_dir, 'contexts.pt')
-        target_save_path = os.path.join(self.processed_dir, 'targets.pt')
 
-        torch.save(targets, target_save_path)
+        data_save_path = os.path.join(self.processed_dir, 'data.pt')
+        graph_data_save_path = os.path.join(self.processed_dir, 'graph_data.pt')
+
+        torch.save(data_list, data_save_path)
         if self.graph_context:
-            data, slices = self.collate(contexts)
-            torch.save((data, slices), context_save_path)
-        else:
-            torch.save(contexts, context_save_path)
+            data, slices = self.collate(graph_data_list)
+            torch.save((data, slices), graph_data_save_path)
 
 
 def load_and_preprocess_dataset(model, dataset_name, batch_size):

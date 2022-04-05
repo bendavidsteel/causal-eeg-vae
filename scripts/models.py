@@ -19,15 +19,12 @@ class BaseCVAE(torch.nn.Module):
         self.encoder = Encoder(encoder_layer_sizes, latent_size, context_embedding_size)
         self.decoder = Decoder(decoder_layer_sizes, latent_size, context_embedding_size)
 
-    def forward(self, condition, inference_start_tokens, z=None, target=None):
+    def forward(self, conditioner_context, decoder_context, target):
 
-        if z and not target:
-            return self.inference(z, condition)
-
-        condition = self.conditioner(condition)
+        condition = self.conditioner(conditioner_context)
         means, log_var = self.encoder(target, condition)
         z = self.reparameterize(means, log_var)
-        logits, loss = self.decoder(z, condition)
+        logits, loss = self.decoder(z, decoder_context, condition)
 
         return logits, loss, means, log_var, z
 
@@ -38,10 +35,10 @@ class BaseCVAE(torch.nn.Module):
 
         return mu + eps * std
 
-    def inference(self, z, y):
+    def inference(self, latent, conditioner_context, decoder_context):
 
-        y = self.conditioner(y)
-        logits, loss = self.decoder(z, y)
+        condition = self.conditioner(conditioner_context)
+        logits, loss = self.decoder(latent, decoder_context, condition)
 
         return logits
 
@@ -153,13 +150,13 @@ class Decoder(torch.nn.Module):
             self.MLP.add_module(name=f"A{i}", module=torch.nn.ReLU())
             self.MLP.add_module(name=f"D{i}", module=torch.nn.Dropout())
 
-        self.text_gen = gpt2.GPT2LMHeadModel.from_pretrained("gpt2", config=config)
+        self.gpt2 = gpt2.GPT2LMHeadModel.from_pretrained("gpt2", config=config)
 
-    def forward(self, z, c, ):
-        z = torch.cat((z, c), dim=-1)
+    def forward(self, latent, decoder_context, condition):
+        z = torch.cat((latent, condition), dim=-1)
 
         x = self.MLP(z)
 
-        output = self.text_gen(latent_z=x)
+        output = self.gpt2(decoder_context, latent_z=x)
 
         return output.logits, output.loss

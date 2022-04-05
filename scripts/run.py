@@ -1,4 +1,5 @@
 import argparse
+from json import decoder
 import os
 
 import nltk
@@ -40,13 +41,13 @@ def train(model, train_data, val_data, device, checkpoint_path, resume):
         # train on training set
         train_loss = 0
         for batch in train_data:
-            context = batch[0].to(device)
-            target = batch[1].to(device)
-            inference_start = torch.tensor([], dtype='long').to(device)
+            decoder_context = batch[0].to(device)
+            conditioner_context = batch[1].to(device)
+            target = batch[2].to(device)
 
             optimizer.zero_grad()
 
-            logits, recon_loss, means, log_var, z = model(context, inference_start, target=target)
+            logits, recon_loss, means, log_var, z = model(conditioner_context, decoder_context, target=target)
             loss = recon_loss + kl_loss(means, log_var)
             loss.backward()
             optimizer.step()
@@ -55,12 +56,12 @@ def train(model, train_data, val_data, device, checkpoint_path, resume):
         # trail on validation set
         val_loss = 0
         for batch in val_data:
-            context = batch[0].to(device)
-            target = batch[1].to(device)
-            inference_start = torch.tensor([], dtype='long').to(device)
+            decoder_context = batch[0].to(device)
+            conditioner_context = batch[1].to(device)
+            target = batch[2].to(device)
 
             with torch.no_grad():
-                logits, recon_loss, means, log_var, z = model(context, inference_start, target=target)
+                logits, recon_loss, means, log_var, z = model(conditioner_context, decoder_context, target=target)
             loss = recon_loss + kl_loss(means, log_var)
 
             val_loss += float(loss)
@@ -92,13 +93,13 @@ def test(model, data, device):
     model.eval()
     with torch.no_grad():
         for batch in data:
-            context = batch[0].to(device)
-            target = batch[1].to(device)
-            inference_start = torch.tensor([], dtype='long').to(device)
+            decoder_context = batch[0].to(device)
+            conditioner_context = batch[1].to(device)
+            target = batch[2].to(device)
 
             latent_size = model.latent_size
             z = torch.nn.randn([1, latent_size]).to(device)
-            logits, recon_loss, means, log_var, z = model.encode(context, inference_start, z=z)
+            logits, recon_loss, means, log_var, z = model.inference(conditioner_context, decoder_context, z=z)
 
             inferences = []
             for logits_single in logits:
@@ -120,13 +121,13 @@ def gen(model, data, device):
     model.eval()
     with torch.no_grad():
         for batch in data:
-            context = batch[0].to(device)
-            target = batch[1].to(device)
-            inference_start = torch.tensor([], dtype='long').to(device)
+            decoder_context = batch[0].to(device)
+            conditioner_context = batch[1].to(device)
+            target = batch[2].to(device)
 
             latent_size = model.latent_size
             z = torch.nn.randn([1, latent_size]).to(device)
-            logits, recon_loss, means, log_var, z = model.encode(context, inference_start, z=z, target=target)
+            logits, recon_loss, means, log_var, z = model.inference(conditioner_context, decoder_context, z=z, target=target)
 
             inferences = tokenizer.batch_decode(logits)
 
