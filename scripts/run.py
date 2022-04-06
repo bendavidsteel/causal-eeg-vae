@@ -197,8 +197,8 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, default='gcvae', choices=['gcvae', 'cvae'])
     parser.add_argument('--mode', type=str, default='train', choices=['train', 'test', 'gen'])
     parser.add_argument('--dataset', type=str)
-    parser.add_argument('--checkpoint-path', type=str)
-    parser.add_argument('--resume', type=bool)
+    parser.add_argument('--checkpoint-path', type=str, default='./checkpoints')
+    parser.add_argument('--resume', type=bool, default=False)
     parser.add_argument('--batch-size', type=int, default=32)
     args = parser.parse_args()
 
