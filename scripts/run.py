@@ -22,7 +22,8 @@ def train(model, train_data, val_data, device, checkpoint_path, resume, graph_co
     loss_fct = torch.nn.CrossEntropyLoss()
     model.train()
 
-    min_val_loss = None
+    min_val_loss = 999999
+    epochs_since_best = 0
 
     if resume:
         model.load_state_dict(torch.load(os.path.join(checkpoint_path, 'best_model.pt')))
@@ -88,9 +89,6 @@ def train(model, train_data, val_data, device, checkpoint_path, resume, graph_co
             val_loss += float(loss)
 
         val_loss /= batch_idx
-
-        if not min_val_loss:
-            min_val_loss = val_loss
 
         # save best model so far
         if val_loss < min_val_loss:

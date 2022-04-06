@@ -112,6 +112,7 @@ class Conditioner(torch.nn.Module):
         for i, (in_size, out_size) in enumerate(zip([embedding_hidden_size] + layer_sizes[:-1], layer_sizes)):
             self.layers.add_module(name=f"L{i}", module=torch.nn.Linear(in_size, out_size))
             self.layers.add_module(name=f"A{i}", module=torch.nn.ReLU())
+            self.layers.add_module(name=f"D{i}", module=torch.nn.Dropout())
 
     def forward(self, input):
         input_ids, attention_mask = input
@@ -157,7 +158,7 @@ class Decoder(torch.nn.Module):
     def __init__(self, layer_sizes, latent_size, context_embedding_size):
         super().__init__()
 
-        config = transformers.GPT2Config.from_pretrained("sshleifer/tiny-gpt2")
+        config = transformers.GPT2Config.from_pretrained("distilgpt2")
         gpt2_hidden_size = config.n_embd
         gpt2_num_layers = config.num_hidden_layers
 
@@ -168,7 +169,7 @@ class Decoder(torch.nn.Module):
             self.MLP.add_module(name=f"A{i}", module=torch.nn.ReLU())
             self.MLP.add_module(name=f"D{i}", module=torch.nn.Dropout())
 
-        self.gpt2 = gpt2.GPT2LMHeadModel.from_pretrained("sshleifer/tiny-gpt2", config=config)
+        self.gpt2 = gpt2.GPT2LMHeadModel.from_pretrained("distilgpt2", config=config)
         # freeze embedding weights
         for param in self.gpt2.transformer.wte.parameters():
             param.requires_grad = False
