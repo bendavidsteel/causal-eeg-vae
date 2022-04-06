@@ -12,11 +12,13 @@ MAX_TOKENS = 300
 MAX_TOP_PREDECESSORS = 3
 NUM_GENERATIONS = 3
 
-def get_top_n_predecessors(graph, node, n):
+def get_top_n_valid_predecessors(graph, node, n):
     predecessors = graph.predecessors(node)
     predec_weights = []
     for predecessor in predecessors:
-        predec_weights.append((predecessor, graph[predecessor][node]['entities']))
+        num_entities = graph[predecessor][node]['entities']
+        if num_entities > 1:
+            predec_weights.append((predecessor, num_entities))
 
     sorted_predecessors = [predec[0] for predec in sorted(predec_weights, key=lambda x: x[1], reverse=True)]
 
@@ -28,7 +30,7 @@ def get_n_gen_ancestors(graph, node, num_gens, num_predecessors):
         return set([node])
 
     ancestors = set()
-    predecessors = get_top_n_predecessors(graph, node, num_predecessors)
+    predecessors = get_top_n_valid_predecessors(graph, node, num_predecessors)
     for predecessor in predecessors:
         sub_ancestors = get_n_gen_ancestors(graph, predecessor, num_gens - 1, num_predecessors)
         ancestors.add(predecessor)
@@ -44,6 +46,9 @@ def visualize_graph_context(raw_dir, dataset_name):
     # drop nan rows
     nodes_df = nodes_df.dropna()
 
+    # drop duplicate titles
+    nodes_df = nodes_df.drop_duplicates(subset='title')
+
     graph = nx.DiGraph()
 
     node_mapping = {}
@@ -52,8 +57,7 @@ def visualize_graph_context(raw_dir, dataset_name):
     for idx, node_row in tqdm.tqdm(nodes_df.iterrows(), total=len(nodes_df)):
         node_mapping[node_row['id']] = idx
 
-        first_sentences = ' '.join(nltk.tokenize.sent_tokenize(node_row['text'])[:NUM_SENTENCES - 1])
-        node_text = node_row['title'] + '. ' + first_sentences
+        node_text = node_row['title']
 
         graph.add_node(idx, node_text=node_text)
 
@@ -77,20 +81,25 @@ def visualize_graph_context(raw_dir, dataset_name):
         if graph.in_degree(node) == 0:
             continue
 
-        context_node = get_top_n_predecessors(graph, node, 1)[0]
+        predecessors = get_top_n_valid_predecessors(graph, node, 1)
+        if len(predecessors) == 0:
+            continue
+
+        context_node = predecessors[0]
 
         ancestors = get_n_gen_ancestors(graph, node, NUM_GENERATIONS, MAX_TOP_PREDECESSORS)
+        ancestors.add(node)
         graph_context = nx.induced_subgraph(graph, ancestors).copy()
 
         pos = nx.spring_layout(graph_context)
         nx.draw(
             graph_context, pos, edge_color='black', width=1, linewidths=1,
             node_size=500, node_color='pink', alpha=0.9,
-            labels={node: graph_context.nodes[node]['title'] for node in graph_context.nodes()}
+            labels={node: graph_context.nodes[node]['node_text'] for node in graph_context.nodes()}
         )
         nx.draw_networkx_edge_labels(
             graph_context, pos,
-            edge_labels={edge: graph_context.edges[edge]['entity'] for edge in graph_context.edges()},
+            edge_labels={edge: graph_context.edges[edge]['entities'] for edge in graph_context.edges()},
             font_color='red'
         )
         plt.show()

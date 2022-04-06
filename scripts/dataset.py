@@ -18,11 +18,13 @@ NUM_GENERATIONS = 3
 
 ContextTargetData = collections.namedtuple('ContextTargetData', ['target', 'context'])
 
-def get_top_n_predecessors(graph, node, n):
+def get_top_n_valid_predecessors(graph, node, n):
     predecessors = graph.predecessors(node)
     predec_weights = []
     for predecessor in predecessors:
-        predec_weights.append((predecessor, graph[predecessor][node]['entities']))
+        num_entities = graph[predecessor][node]['entities']
+        if num_entities > 1:
+            predec_weights.append((predecessor, num_entities))
 
     sorted_predecessors = [predec[0] for predec in sorted(predec_weights, key=lambda x: x[1], reverse=True)]
 
@@ -34,7 +36,7 @@ def get_n_gen_ancestors(graph, node, num_gens, num_predecessors):
         return set([node])
 
     ancestors = set()
-    predecessors = get_top_n_predecessors(graph, node, num_predecessors)
+    predecessors = get_top_n_valid_predecessors(graph, node, num_predecessors)
     for predecessor in predecessors:
         sub_ancestors = get_n_gen_ancestors(graph, predecessor, num_gens - 1, num_predecessors)
         ancestors.add(predecessor)
@@ -104,6 +106,9 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
         # drop nan rows
         nodes_df = nodes_df.dropna()
 
+        # drop duplicate titles
+        nodes_df = nodes_df.drop_duplicates(subset='title')
+
         graph = nx.DiGraph()
 
         bert_tokenizer = transformers.DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
@@ -159,7 +164,7 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
             data['target_output_ids'] = torch.tensor(tokens['gpt2_input_ids'], dtype=torch.long)
             data['target_output_attention_mask'] = torch.tensor(tokens['gpt2_attention_mask'], dtype=torch.long)
 
-            context_node = get_top_n_predecessors(graph, node, 1)[0]
+            context_node = get_top_n_valid_predecessors(graph, node, 1)[0]
             data['decoder_input_ids'] = torch.tensor(graph.nodes[context_node]['gpt2_input_ids'])
             data['decoder_attention_mask'] = torch.tensor(graph.nodes[context_node]['gpt2_attention_mask'])
 
