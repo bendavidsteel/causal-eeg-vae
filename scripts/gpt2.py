@@ -836,7 +836,7 @@ class GPT2Model(GPT2PreTrainedModel):
         hidden_states = inputs_embeds + position_embeds
 
         if latent_variable is not None:
-            hidden_states += latent_variable
+            hidden_states += torch.unsqueeze(latent_variable, 1)
 
         if token_type_ids is not None:
             token_type_embeds = self.wte(token_type_ids)

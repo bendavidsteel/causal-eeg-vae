@@ -106,7 +106,7 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
         graph = nx.DiGraph()
 
-        roberta_tokenizer = transformers.RobertaTokenizerFast.from_pretrained("roberta-base")
+        bert_tokenizer = transformers.DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
         gpt2_tokenizer = transformers.GPT2TokenizerFast.from_pretrained("gpt2")
         # set pad_token_id to unk_token_id -> be careful here as unk_token_id == eos_token_id == bos_token_id
         gpt2_tokenizer.pad_token = gpt2_tokenizer.unk_token
@@ -119,12 +119,12 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
             first_sentences = ' '.join(nltk.tokenize.sent_tokenize(node_row['text'])[:NUM_SENTENCES - 1])
             node_text = node_row['title'] + '. ' + first_sentences
-            roberta_tokens = roberta_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
+            bert_tokens = bert_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
             gpt2_tokens = gpt2_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
 
             graph.add_node(idx, 
-                           roberta_input_ids=roberta_tokens.input_ids,
-                           roberta_attention_mask=roberta_tokens.attention_mask,
+                           bert_input_ids=bert_tokens.input_ids,
+                           bert_attention_mask=bert_tokens.attention_mask,
                            gpt2_input_ids=gpt2_tokens.input_ids,
                            gpt2_attention_mask=gpt2_tokens.attention_mask)
 
@@ -153,8 +153,8 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
             data = {}
 
-            data['target_input_ids'] = torch.tensor(tokens['roberta_input_ids'], dtype=torch.long)
-            data['target_input_attention_mask'] = torch.tensor(tokens['roberta_attention_mask'], dtype=torch.long)
+            data['target_input_ids'] = torch.tensor(tokens['bert_input_ids'], dtype=torch.long)
+            data['target_input_attention_mask'] = torch.tensor(tokens['bert_attention_mask'], dtype=torch.long)
 
             data['target_output_ids'] = torch.tensor(tokens['gpt2_input_ids'], dtype=torch.long)
             data['target_output_attention_mask'] = torch.tensor(tokens['gpt2_attention_mask'], dtype=torch.long)
@@ -173,8 +173,8 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
                 node_map = {}
                 for node_idx, (context_node, context_tokens) in enumerate(graph_context.nodes(data=True)):
-                    node_token_ids[node_idx, :] = context_tokens['roberta_input_ids']
-                    node_attention_mask[node_idx, :] = context_tokens['roberta_attention_mask']
+                    node_token_ids[node_idx, :] = context_tokens['bert_input_ids']
+                    node_attention_mask[node_idx, :] = context_tokens['bert_attention_mask']
 
                     node_map[context_node] = node_idx
 
@@ -191,8 +191,8 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
                 graph_data_list.append(graph_context)
 
             else:
-                data['conditioner_input_ids'] = torch.tensor(graph[context_node]['roberta_input_ids'])
-                data['conditioner_attention_mask'] = torch.tensor(graph[context_node]['roberta_attention_mask'])
+                data['conditioner_input_ids'] = torch.tensor(graph[context_node]['bert_input_ids'])
+                data['conditioner_attention_mask'] = torch.tensor(graph[context_node]['bert_attention_mask'])
 
             data_list.append(data)
 
@@ -217,8 +217,8 @@ def load_and_preprocess_dataset(model, dataset_name, batch_size):
     test_size = len(dataset) - train_size - val_size
     train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, val_size, test_size])
 
-    train_dataloader = torch_geometric.loader.DataLoader(train_dataset, batch_size=batch_size)
-    val_dataloader = torch_geometric.loader.DataLoader(val_dataset, batch_size=batch_size)
-    test_dataloader = torch_geometric.loader.DataLoader(test_dataset, batch_size=batch_size)
+    train_dataloader = torch_geometric.loader.DataLoader(train_dataset, batch_size=batch_size, follow_batch=['input_ids', 'attention_mask'])
+    val_dataloader = torch_geometric.loader.DataLoader(val_dataset, batch_size=batch_size, follow_batch=['input_ids', 'attention_mask'])
+    test_dataloader = torch_geometric.loader.DataLoader(test_dataset, batch_size=batch_size, follow_batch=['input_ids', 'attention_mask'])
 
     return train_dataloader, val_dataloader, test_dataloader

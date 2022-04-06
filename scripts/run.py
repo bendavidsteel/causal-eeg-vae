@@ -1,10 +1,10 @@
 import argparse
-from json import decoder
 import os
 
 import nltk
 import torch
 import transformers
+import tqdm
 
 import models, dataset
 
@@ -31,7 +31,8 @@ def train(model, train_data, val_data, device, checkpoint_path, resume, graph_co
 
         # train on training set
         train_loss = 0
-        for batch in train_data:
+        progress_bar_data = tqdm.tqdm(enumerate(train_data), total=len(train_data))
+        for batch_idx, batch in progress_bar_data:
             target_input_ids = batch['target_input_ids'].to(device)
             target_input_attention_mask = batch['target_input_attention_mask'].to(device)
 
@@ -56,13 +57,17 @@ def train(model, train_data, val_data, device, checkpoint_path, resume, graph_co
             loss = recon_loss + kl_loss
             loss.backward()
             optimizer.step()
-            train_loss += float(loss)
+            batch_loss = float(loss)
+            progress_bar_data.set_description(f"Current Loss: {batch_loss:.4f}")
+            train_loss += batch_loss
+        
+        train_loss /= batch_idx
 
         # trail on validation set
         val_loss = 0
-        for batch in val_data:
+        for batch_idx, batch in enumerate(val_data):
             target_input_ids = batch['target_input_ids'].to(device)
-            target_attention_mask = batch['target_attention_mask'].to(device)
+            target_attention_mask = batch['target_input_attention_mask'].to(device)
             target_output_ids = batch['target_output_ids'].to(device)
             decoder_input_ids = batch['decoder_input_ids'].to(device)
             decoder_attention_mask = batch['decoder_attention_mask'].to(device)
@@ -75,9 +80,14 @@ def train(model, train_data, val_data, device, checkpoint_path, resume, graph_co
             with torch.no_grad():
                 logits, means, log_var, z = model(conditioner_context, decoder_input_ids, decoder_attention_mask, 
                                                               target_input_ids=target_input_ids, target_attention_mask=target_attention_mask)
-            loss = recon_loss(target_output_ids, logits) + kl_loss(means, log_var)
+            
+            recon_loss = loss_fct(logits.view(-1, logits.size(-1)), target_output_ids.view(-1))
+            kl_loss = get_kl_loss(means, log_var)
+            loss = recon_loss + kl_loss
 
             val_loss += float(loss)
+
+        val_loss /= batch_idx
 
         if not min_val_loss:
             min_val_loss = val_loss
@@ -95,7 +105,7 @@ def train(model, train_data, val_data, device, checkpoint_path, resume, graph_co
         if epochs_since_best > 100:
             break
 
-        print(f'Epoch: {epoch:03d}, AUC: {auc:.4f}, AP: {ap:.4f}')
+        print(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
 
 
 def test(model, data, device, graph_context):
@@ -165,10 +175,10 @@ def main(args):
 
     train_data, val_data, test_data = dataset.load_and_preprocess_dataset(args.model, args.dataset, args.batch_size)
 
-    encoder_layer_sizes = [256, 256]
-    latent_size = 16
-    decoder_layer_sizes = [256, 256]
-    conditioner_layer_sizes = [256, 256, 256]
+    encoder_layer_sizes = [128, 128]
+    latent_size = 4
+    decoder_layer_sizes = [128, 128]
+    conditioner_layer_sizes = [128, 128]
     if args.model == 'gcvae':
         model = models.GCVAE(encoder_layer_sizes, latent_size, decoder_layer_sizes, conditioner_layer_sizes)
     elif args.model == 'cvae':
