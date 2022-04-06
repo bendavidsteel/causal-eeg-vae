@@ -11,24 +11,15 @@ import models, dataset
 MAX_LOGSTD = 10
 MAX_EPOCHS = 1000
 
-def kl_loss(mu, logstd):
-    r"""Computes the KL loss, either for the passed arguments :obj:`mu`
-    and :obj:`logstd`, or based on latent variables from last encoding.
-
-    Args:
-        mu (Tensor): The latent space for :math:`\mu`. If set to
-            :obj:`None`, uses the last computation of :math:`mu`.
-            (default: :obj:`None`)
-        logstd (Tensor): The latent space for
-            :math:`\log\sigma`.  If set to :obj:`None`, uses the last
-            computation of :math:`\log\sigma^2`.(default: :obj:`None`)
-    """
+def get_kl_loss(mu, logstd):
     logstd = logstd.clamp(max=MAX_LOGSTD)
     return -0.5 * torch.mean(torch.sum(1 + 2 * logstd - mu**2 - logstd.exp()**2, dim=1))
 
-def train(model, train_data, val_data, device, checkpoint_path, resume):
+
+def train(model, train_data, val_data, device, checkpoint_path, resume, graph_context):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    loss_fct = torch.nn.CrossEntropyLoss()
     model.train()
 
     min_val_loss = None
@@ -41,14 +32,28 @@ def train(model, train_data, val_data, device, checkpoint_path, resume):
         # train on training set
         train_loss = 0
         for batch in train_data:
-            decoder_context = batch[0].to(device)
-            conditioner_context = batch[1].to(device)
-            target = batch[2].to(device)
+            target_input_ids = batch['target_input_ids'].to(device)
+            target_input_attention_mask = batch['target_input_attention_mask'].to(device)
+
+            target_output_ids = batch['target_output_ids'].to(device)
+            target_output_attention_mask = batch['target_output_attention_mask'].to(device)
+
+            decoder_input_ids = batch['decoder_input_ids'].to(device)
+            decoder_attention_mask = batch['decoder_attention_mask'].to(device)
+
+            if graph_context:
+                conditioner_context = batch['conditioner_graph'].to(device)
+            else:
+                conditioner_context = (batch['conditioner_input_ids'].to(device), batch['conditioner_attention_mask'].to(device))
 
             optimizer.zero_grad()
 
-            logits, recon_loss, means, log_var, z = model(conditioner_context, decoder_context, target=target)
-            loss = recon_loss + kl_loss(means, log_var)
+            logits, means, log_var, z = model(conditioner_context, decoder_input_ids, decoder_attention_mask, 
+                                                          target_input_ids=target_input_ids, target_attention_mask=target_input_attention_mask)
+            
+            recon_loss = loss_fct(logits.view(-1, logits.size(-1)), target_output_ids.view(-1))
+            kl_loss = get_kl_loss(means, log_var)
+            loss = recon_loss + kl_loss
             loss.backward()
             optimizer.step()
             train_loss += float(loss)
@@ -56,13 +61,21 @@ def train(model, train_data, val_data, device, checkpoint_path, resume):
         # trail on validation set
         val_loss = 0
         for batch in val_data:
-            decoder_context = batch[0].to(device)
-            conditioner_context = batch[1].to(device)
-            target = batch[2].to(device)
+            target_input_ids = batch['target_input_ids'].to(device)
+            target_attention_mask = batch['target_attention_mask'].to(device)
+            target_output_ids = batch['target_output_ids'].to(device)
+            decoder_input_ids = batch['decoder_input_ids'].to(device)
+            decoder_attention_mask = batch['decoder_attention_mask'].to(device)
+
+            if graph_context:
+                conditioner_context = batch['conditioner_graph'].to(device)
+            else:
+                conditioner_context = (batch['conditioner_input_ids'].to(device), batch['conditioner_attention_mask'].to(device))
 
             with torch.no_grad():
-                logits, recon_loss, means, log_var, z = model(conditioner_context, decoder_context, target=target)
-            loss = recon_loss + kl_loss(means, log_var)
+                logits, means, log_var, z = model(conditioner_context, decoder_input_ids, decoder_attention_mask, 
+                                                              target_input_ids=target_input_ids, target_attention_mask=target_attention_mask)
+            loss = recon_loss(target_output_ids, logits) + kl_loss(means, log_var)
 
             val_loss += float(loss)
 
@@ -85,7 +98,7 @@ def train(model, train_data, val_data, device, checkpoint_path, resume):
         print(f'Epoch: {epoch:03d}, AUC: {auc:.4f}, AP: {ap:.4f}')
 
 
-def test(model, data, device):
+def test(model, data, device, graph_context):
 
     tokenizer = transformers.GPT2TokenizerFast.from_pretrained("gpt2")
 
@@ -93,13 +106,19 @@ def test(model, data, device):
     model.eval()
     with torch.no_grad():
         for batch in data:
-            decoder_context = batch[0].to(device)
-            conditioner_context = batch[1].to(device)
-            target = batch[2].to(device)
+            target_input_ids = batch['target_input_ids'].to(device)
+            target_attention_mask = batch['target_attention_mask'].to(device)
+            decoder_input_ids = batch['decoder_input_ids'].to(device)
+            decoder_attention_mask = batch['decoder_attention_mask'].to(device)
+
+            if graph_context:
+                conditioner_context = batch['conditioner_graph'].to(device)
+            else:
+                conditioner_context = (batch['conditioner_input_ids'].to(device), batch['conditioner_attention_mask'].to(device))
 
             latent_size = model.latent_size
             z = torch.nn.randn([1, latent_size]).to(device)
-            logits, recon_loss, means, log_var, z = model.inference(conditioner_context, decoder_context, z=z)
+            logits, recon_loss, means, log_var, z = model(conditioner_context, decoder_context, z=z)
 
             inferences = []
             for logits_single in logits:
@@ -114,20 +133,26 @@ def test(model, data, device):
     print(f"Average bleu score is {avg_bleu_score}")
 
 
-def gen(model, data, device):
+def gen(model, data, device, graph_context):
     tokenizer = transformers.GPT2TokenizerFast.from_pretrained("gpt2")
 
     bleu_scores = []
     model.eval()
     with torch.no_grad():
         for batch in data:
-            decoder_context = batch[0].to(device)
-            conditioner_context = batch[1].to(device)
-            target = batch[2].to(device)
+            target_input_ids = batch['target_input_ids'].to(device)
+            target_attention_mask = batch['target_attention_mask'].to(device)
+            decoder_input_ids = batch['decoder_input_ids'].to(device)
+            decoder_attention_mask = batch['decoder_attention_mask'].to(device)
+
+            if graph_context:
+                conditioner_context = batch['conditioner_graph'].to(device)
+            else:
+                conditioner_context = (batch['conditioner_input_ids'].to(device), batch['conditioner_attention_mask'].to(device))
 
             latent_size = model.latent_size
             z = torch.nn.randn([1, latent_size]).to(device)
-            logits, recon_loss, means, log_var, z = model.inference(conditioner_context, decoder_context, z=z, target=target)
+            logits, recon_loss, means, log_var, z = model(conditioner_context, decoder_context, z=z, target=target)
 
             inferences = tokenizer.batch_decode(logits)
 
@@ -152,11 +177,11 @@ def main(args):
     model = model.to(device)
 
     if args.mode == 'train':
-        train(model, train_data, val_data, device, args.checkpoint_path, args.resume)
+        train(model, train_data, val_data, device, args.checkpoint_path, args.resume, args.model == 'gcvae')
     elif args.mode == 'test':
-        test(model, test_data, device)
+        test(model, test_data, device, args.model == 'gcvae')
     elif args.mode == 'gen':
-        gen(model, test_data, device)
+        gen(model, test_data, device, args.model == 'gcvae')
 
 if __name__ == '__main__':
 

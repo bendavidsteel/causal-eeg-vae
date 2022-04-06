@@ -154,7 +154,10 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
             data = {}
 
             data['target_input_ids'] = torch.tensor(tokens['roberta_input_ids'], dtype=torch.long)
-            data['target_attention_mask'] = torch.tensor(tokens['roberta_attention_mask'], dtype=torch.long)
+            data['target_input_attention_mask'] = torch.tensor(tokens['roberta_attention_mask'], dtype=torch.long)
+
+            data['target_output_ids'] = torch.tensor(tokens['gpt2_input_ids'], dtype=torch.long)
+            data['target_output_attention_mask'] = torch.tensor(tokens['gpt2_attention_mask'], dtype=torch.long)
 
             context_node = get_top_n_predecessors(graph, node, 1)[0]
             data['decoder_input_ids'] = torch.tensor(graph.nodes[context_node]['gpt2_input_ids'])

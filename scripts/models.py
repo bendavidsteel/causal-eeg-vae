@@ -19,14 +19,17 @@ class BaseCVAE(torch.nn.Module):
         self.encoder = Encoder(encoder_layer_sizes, latent_size, context_embedding_size)
         self.decoder = Decoder(decoder_layer_sizes, latent_size, context_embedding_size)
 
-    def forward(self, conditioner_context, decoder_context, target):
+    def forward(self, conditioner_context, decoder_input_ids, decoder_attention_mask, target_input_ids=None, target_attention_mask=None, latent=None):
+
+        if latent and not target_input_ids:
+            self.inference(latent, conditioner_context, decoder_input_ids, decoder_attention_mask)
 
         condition = self.conditioner(conditioner_context)
-        means, log_var = self.encoder(target, condition)
-        z = self.reparameterize(means, log_var)
-        logits, loss = self.decoder(z, decoder_context, condition)
+        means, log_var = self.encoder(target_input_ids, target_attention_mask, condition)
+        latent = self.reparameterize(means, log_var)
+        logits = self.decoder(latent, decoder_input_ids, decoder_attention_mask, condition)
 
-        return logits, loss, means, log_var, z
+        return logits, means, log_var, latent
 
     def reparameterize(self, mu, log_var):
 
@@ -35,10 +38,10 @@ class BaseCVAE(torch.nn.Module):
 
         return mu + eps * std
 
-    def inference(self, latent, conditioner_context, decoder_context):
+    def inference(self, latent, conditioner_context, decoder_input_ids, decoder_attention_mask):
 
         condition = self.conditioner(conditioner_context)
-        logits, loss = self.decoder(latent, decoder_context, condition)
+        logits = self.decoder(latent, decoder_input_ids, decoder_attention_mask, condition)
 
         return logits
 
@@ -75,7 +78,7 @@ class GraphConditioner(torch.nn.Module):
         self.pooling_layer = torch_geometric.nn.GlobalAttention(gate_nn)
 
     def forward(self, input):
-        output = self.embedding(input.x)
+        output = self.embedding(input_ids=input.input_ids, attention_mask=input.attention_mask)
         # get last hidden state at end of sequence
         x = output.last_hidden_state[:,-1,:]
         x = self.graph_sequential_model(x, input.edge_index)
@@ -95,8 +98,9 @@ class Conditioner(torch.nn.Module):
             self.layers.add_module(name=f"L{i}", module=torch.nn.Linear(in_size, out_size))
             self.layers.add_module(name=f"A{i}", module=torch.nn.ReLU())
 
-    def forward(self, x):
-        x = self.embedding(x)
+    def forward(self, input):
+        input_ids, attention_mask = input
+        x = self.embedding(input_ids=input_ids, attention_mask=attention_mask)
         return self.layers(x)
 
 
@@ -120,12 +124,12 @@ class Encoder(torch.nn.Module):
         self.linear_means = torch.nn.Linear(layer_sizes[-1], latent_size)
         self.linear_log_var = torch.nn.Linear(layer_sizes[-1], latent_size)
 
-    def forward(self, x, c):
-        output = self.embedding(x)
+    def forward(self, input_ids, attention_mask, condition):
+        output = self.embedding(input_ids=input_ids, attention_mask=attention_mask)
         # get last hidden state at end of sequence
         x = output.last_hidden_state[:,-1,:]
 
-        x = torch.cat((x, c), dim=-1)
+        x = torch.cat((x, condition), dim=-1)
 
         x = self.MLP(x)
 
@@ -152,11 +156,11 @@ class Decoder(torch.nn.Module):
 
         self.gpt2 = gpt2.GPT2LMHeadModel.from_pretrained("gpt2", config=config)
 
-    def forward(self, latent, decoder_context, condition):
+    def forward(self, latent, input_ids, attention_mask, condition):
         z = torch.cat((latent, condition), dim=-1)
 
         x = self.MLP(z)
 
-        output = self.gpt2(decoder_context, latent_z=x)
+        output = self.gpt2(input_ids=input_ids, attention_mask=attention_mask, latent_variable=x)
 
-        return output.logits, output.loss
+        return output.logits
