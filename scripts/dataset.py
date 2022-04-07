@@ -12,7 +12,7 @@ import transformers
 import tqdm
 
 NUM_SENTENCES = 3
-MAX_TOKENS = 300
+MAX_TOKENS = 100
 MAX_TOP_PREDECESSORS = 3
 NUM_GENERATIONS = 3
 
@@ -112,9 +112,7 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
         graph = nx.DiGraph()
 
         bert_tokenizer = transformers.DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
-        gpt2_tokenizer = transformers.GPT2TokenizerFast.from_pretrained("gpt2")
-        # set pad_token_id to unk_token_id -> be careful here as unk_token_id == eos_token_id == bos_token_id
-        gpt2_tokenizer.pad_token = gpt2_tokenizer.unk_token
+        t5_tokenizer = transformers.T5TokenizerFast.from_pretrained("google/t5-efficient-tiny")
 
         node_mapping = {}
         # add nodes from dataframe
@@ -122,16 +120,15 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
         for idx, node_row in tqdm.tqdm(nodes_df.iterrows(), total=len(nodes_df)):
             node_mapping[node_row['id']] = idx
 
-            first_sentences = ' '.join(nltk.tokenize.sent_tokenize(node_row['text'])[:NUM_SENTENCES - 1])
-            node_text = node_row['title'] + '. ' + first_sentences
+            node_text = node_row['title']
             bert_tokens = bert_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
-            gpt2_tokens = gpt2_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
+            t5_tokens = t5_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
 
             graph.add_node(idx, 
                            bert_input_ids=bert_tokens.input_ids,
                            bert_attention_mask=bert_tokens.attention_mask,
-                           gpt2_input_ids=gpt2_tokens.input_ids,
-                           gpt2_attention_mask=gpt2_tokens.attention_mask)
+                           t5_input_ids=t5_tokens.input_ids,
+                           t5_attention_mask=t5_tokens.attention_mask)
 
         # add edges from dataframe
         print('Loading edges into graph')
@@ -156,17 +153,22 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
             if graph.in_degree(node) == 0:
                 continue
 
+            predecessors = get_top_n_valid_predecessors(graph, node, 1)
+            if len(predecessors) == 0:
+                continue
+
+            context_node = predecessors[0]
+
             data = {}
 
             data['target_input_ids'] = torch.tensor(tokens['bert_input_ids'], dtype=torch.long)
             data['target_input_attention_mask'] = torch.tensor(tokens['bert_attention_mask'], dtype=torch.long)
 
-            data['target_output_ids'] = torch.tensor(tokens['gpt2_input_ids'], dtype=torch.long)
-            data['target_output_attention_mask'] = torch.tensor(tokens['gpt2_attention_mask'], dtype=torch.long)
+            data['target_output_ids'] = torch.tensor(tokens['t5_input_ids'], dtype=torch.long)
+            data['target_output_attention_mask'] = torch.tensor(tokens['t5_attention_mask'], dtype=torch.long)
 
-            context_node = get_top_n_valid_predecessors(graph, node, 1)[0]
-            data['decoder_input_ids'] = torch.tensor(graph.nodes[context_node]['gpt2_input_ids'])
-            data['decoder_attention_mask'] = torch.tensor(graph.nodes[context_node]['gpt2_attention_mask'])
+            data['decoder_input_ids'] = torch.tensor(graph.nodes[context_node]['t5_input_ids'])
+            data['decoder_attention_mask'] = torch.tensor(graph.nodes[context_node]['t5_attention_mask'])
 
             if self.graph_context:
                 ancestors = get_n_gen_ancestors(graph, node, NUM_GENERATIONS, MAX_TOP_PREDECESSORS)
@@ -192,6 +194,7 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
                     attention_mask = torch.tensor(node_attention_mask, dtype=torch.long),
                     edge_index = torch.tensor(edges, dtype=torch.long).T
                 )
+                graph_context.num_nodes = num_nodes
 
                 graph_data_list.append(graph_context)
 
@@ -211,7 +214,7 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
             torch.save((data, slices), graph_data_save_path)
 
 
-def load_and_preprocess_dataset(model, dataset_name, batch_size):
+def load_and_preprocess_dataset(model, dataset_name):
     path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'data', dataset_name)
     graph_context = model == 'gcvae'
 
@@ -222,8 +225,4 @@ def load_and_preprocess_dataset(model, dataset_name, batch_size):
     test_size = len(dataset) - train_size - val_size
     train_dataset, val_dataset, test_dataset = torch.utils.data.random_split(dataset, [train_size, val_size, test_size])
 
-    train_dataloader = torch_geometric.loader.DataLoader(train_dataset, batch_size=batch_size, follow_batch=['input_ids', 'attention_mask'])
-    val_dataloader = torch_geometric.loader.DataLoader(val_dataset, batch_size=batch_size, follow_batch=['input_ids', 'attention_mask'])
-    test_dataloader = torch_geometric.loader.DataLoader(test_dataset, batch_size=batch_size, follow_batch=['input_ids', 'attention_mask'])
-
-    return train_dataloader, val_dataloader, test_dataloader
+    return train_dataset, val_dataset, test_dataset
