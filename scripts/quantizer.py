@@ -3,10 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
 class VectorQuantizer(nn.Module):
     """
     Discretization bottleneck part of the VQ-VAE.
@@ -41,6 +37,9 @@ class VectorQuantizer(nn.Module):
             2. flatten input to (B*H*W,C)
 
         """
+        # get device
+        device = z.device
+
         # reshape z -> (batch, height, width, channel) and flatten
         z = z.permute(0, 2, 3, 1).contiguous()
         z_flattened = z.view(-1, self.e_dim)

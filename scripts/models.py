@@ -27,13 +27,13 @@ class BaseCVAE(torch.nn.Module):
             return self._generate(latent, conditioner_context, **generate_kwargs)
 
         condition = self.conditioner(conditioner_context)
-        encoding = self.encoder(target_input_ids, target_input_attention_mask, condition)
+        latent = self.encoder(target_input_ids, target_input_attention_mask, condition)
 
-        embedding_loss, latent, perplexity, _, _ = self.vector_quantization(encoding)
+        embedding_loss, latent_quantized, perplexity, _, _ = self.vector_quantization(latent)
 
-        logits, recon_loss = self.decoder(latent, condition, target_ids=target_output_ids)
+        logits, recon_loss = self.decoder(latent_quantized, condition, target_ids=target_output_ids)
 
-        return logits, recon_loss, embedding_loss, latent, perplexity
+        return logits, recon_loss, embedding_loss, perplexity
 
     def reparameterize(self, mu, log_var):
 
@@ -47,8 +47,9 @@ class BaseCVAE(torch.nn.Module):
 
     def _generate(self, latent, conditioner_context, **generate_kwargs):
 
+        _, latent_quantized, _, _, _ = self.vector_quantization(latent)
         condition = self.conditioner(conditioner_context)
-        outputs = self.decoder.generate(latent, condition, **generate_kwargs)
+        outputs = self.decoder.generate(latent_quantized, condition, **generate_kwargs)
 
         return outputs
 
