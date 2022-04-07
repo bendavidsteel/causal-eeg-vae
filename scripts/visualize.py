@@ -77,24 +77,42 @@ def visualize_graph_context(raw_dir, dataset_name):
 
     # process network into torch compat shape
     print('Create context/target pairs from graph')
-    for node, tokens in tqdm.tqdm(graph.nodes(data=True), total=graph.number_of_nodes()):
-        if graph.in_degree(node) == 0:
+    for target_node, tokens in tqdm.tqdm(graph.nodes(data=True), total=graph.number_of_nodes()):
+        if graph.in_degree(target_node) == 0:
             continue
 
-        predecessors = get_top_n_valid_predecessors(graph, node, 1)
+        predecessors = get_top_n_valid_predecessors(graph, target_node, 1)
         if len(predecessors) == 0:
             continue
 
         context_node = predecessors[0]
 
-        ancestors = get_n_gen_ancestors(graph, node, NUM_GENERATIONS, MAX_TOP_PREDECESSORS)
-        ancestors.add(node)
+        ancestors = get_n_gen_ancestors(graph, target_node, NUM_GENERATIONS, MAX_TOP_PREDECESSORS)
+        ancestors.add(target_node)
         graph_context = nx.induced_subgraph(graph, ancestors).copy()
 
-        pos = nx.spring_layout(graph_context)
-        nx.draw(
-            graph_context, pos, edge_color='black', width=1, linewidths=1,
-            node_size=500, node_color='pink', alpha=0.9,
+        pos = nx.nx_agraph.graphviz_layout(graph_context)
+
+        node_colours = []
+        for node in graph_context.nodes():
+            if node == target_node:
+                node_colours.append('red')
+            elif node == context_node:
+                node_colours.append('blue')
+            else:
+                node_colours.append('pink')
+
+        avg_x_pos = sum(v[0] for k,v in pos.items()) / len(pos)
+
+        nx.draw_networkx_nodes(
+            graph_context, pos, linewidths=1,
+            node_size=500, node_color=node_colours, alpha=0.9
+        )
+        nx.draw_networkx_edges(
+            graph_context, pos, edge_color='black', width=1, alpha=0.9,
+        )
+        nx.draw_networkx_labels(
+            graph_context, pos = {k:([v[0] + 0.4*(avg_x_pos - v[0]), v[1]]) for k,v in pos.items()}, alpha=0.9,
             labels={node: graph_context.nodes[node]['node_text'] for node in graph_context.nodes()}
         )
         nx.draw_networkx_edge_labels(
@@ -102,6 +120,7 @@ def visualize_graph_context(raw_dir, dataset_name):
             edge_labels={edge: graph_context.edges[edge]['entities'] for edge in graph_context.edges()},
             font_color='red'
         )
+        
         plt.show()
 
 def main(args):

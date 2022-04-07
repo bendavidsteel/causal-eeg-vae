@@ -2,9 +2,11 @@ import torch
 import torch_geometric
 import transformers
 
+import quantizer
+
 class BaseCVAE(torch.nn.Module):
 
-    def __init__(self, embedding, embedding_hidden_size, encoder_layer_sizes, latent_size, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length):
+    def __init__(self, embedding, embedding_hidden_size, encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length):
         super().__init__()
 
         assert type(encoder_layer_sizes) == list
@@ -16,6 +18,8 @@ class BaseCVAE(torch.nn.Module):
         self.latent_size = latent_size
         self.encoder = Encoder(embedding, embedding_hidden_size, encoder_layer_sizes, latent_size, context_embedding_size)
         self.decoder = Decoder(decoder_layer_sizes, latent_size, context_embedding_size, target_seq_length)
+        # pass continuous latent vector through discretization bottleneck
+        self.vector_quantization = quantizer.VectorQuantizer(num_latent_embeddings, latent_size, beta)
 
     def forward(self, conditioner_context, target_input_ids=None, target_input_attention_mask=None, target_output_ids=None, latent=None, generate=False, **generate_kwargs):
 
@@ -23,11 +27,13 @@ class BaseCVAE(torch.nn.Module):
             return self._generate(latent, conditioner_context, **generate_kwargs)
 
         condition = self.conditioner(conditioner_context)
-        means, log_var = self.encoder(target_input_ids, target_input_attention_mask, condition)
-        latent = self.reparameterize(means, log_var)
+        encoding = self.encoder(target_input_ids, target_input_attention_mask, condition)
+
+        embedding_loss, latent, perplexity, _, _ = self.vector_quantization(encoding)
+
         logits, recon_loss = self.decoder(latent, condition, target_ids=target_output_ids)
 
-        return logits, recon_loss, means, log_var, latent
+        return logits, recon_loss, embedding_loss, latent, perplexity
 
     def reparameterize(self, mu, log_var):
 
@@ -133,13 +139,10 @@ class Encoder(torch.nn.Module):
 
         self.MLP = torch.nn.Sequential()
 
-        for i, (in_size, out_size) in enumerate(zip([embedding_hidden_size + context_embedding_size] + layer_sizes[:-1], layer_sizes)):
+        for i, (in_size, out_size) in enumerate(zip([embedding_hidden_size + context_embedding_size] + layer_sizes, layer_sizes + [latent_size])):
             self.MLP.add_module(name=f"L{i}", module=torch.nn.Linear(in_size, out_size))
             self.MLP.add_module(name=f"A{i}", module=torch.nn.ReLU())
             self.MLP.add_module(name=f"D{i}", module=torch.nn.Dropout())
-
-        self.linear_means = torch.nn.Linear(layer_sizes[-1], latent_size)
-        self.linear_log_var = torch.nn.Linear(layer_sizes[-1], latent_size)
 
     def forward(self, input_ids, attention_mask, condition):
         output = self.embedding(input_ids=input_ids, attention_mask=attention_mask)
@@ -150,10 +153,7 @@ class Encoder(torch.nn.Module):
 
         x = self.MLP(x)
 
-        means = self.linear_means(x)
-        log_vars = self.linear_log_var(x)
-
-        return means, log_vars
+        return x
 
 
 class Decoder(torch.nn.Module):
