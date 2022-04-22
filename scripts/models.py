@@ -2,6 +2,7 @@ import torch
 import torch_geometric
 import transformers
 
+import gpt2
 import quantizer
 
 class BaseCVAE(torch.nn.Module):
@@ -159,13 +160,45 @@ class Encoder(torch.nn.Module):
 
 class Decoder(torch.nn.Module):
 
-    def __init__(self, layer_sizes, latent_size, context_embedding_size, target_seq_length):
+    def __init__(self, layer_sizes, latent_size, context_embedding_size, target_seq_length, lm_name):
         super().__init__()
 
         self.target_seq_length = target_seq_length
 
-        config = transformers.T5Config.from_pretrained("google/t5-efficient-tiny")
-        lm_hidden_size = config.d_model
+        self.lm_name = lm_name
+
+        if lm_name == 't5':
+            config = transformers.T5Config.from_pretrained("google/t5-efficient-tiny")
+            lm_hidden_size = config.d_model
+            self.lm = transformers.T5ForConditionalGeneration.from_pretrained("google/t5-efficient-tiny")
+
+            # later weights
+            for param in self.lm.lm_head.parameters():
+                param.requires_grad = False
+
+            for param in self.lm.decoder.block[2:].parameters():
+                param.requires_grad = False
+
+        elif lm_name == 'gpt2':
+            config = transformers.GPT2Config.from_pretrained("distilgpt2")
+            lm_hidden_size = config.n_embd
+
+            self.lm = gpt2.GPT2LMHeadModel.from_pretrained("distilgpt2", config=config)
+            # freeze embedding weights
+            for param in self.lm.transformer.wte.parameters():
+                param.requires_grad = False
+
+            # freeze position weights
+            for param in self.lm.transformer.wpe.parameters():
+                param.requires_grad = False
+
+            # freeze later transformer blocks
+            for param in self.lm.transformer.h[1:].parameters():
+                param.requires_grad = False
+
+            # freeze lm head
+            for param in self.lm.lm_head.parameters():
+                param.requires_grad = False
 
         self.MLP = torch.nn.Sequential()
 
@@ -174,16 +207,8 @@ class Decoder(torch.nn.Module):
             self.MLP.add_module(name=f"A{i}", module=torch.nn.ReLU())
             self.MLP.add_module(name=f"D{i}", module=torch.nn.Dropout())
 
-        self.lm = transformers.T5ForConditionalGeneration.from_pretrained("google/t5-efficient-tiny")
-        
-        # later weights
-        for param in self.lm.lm_head.parameters():
-            param.requires_grad = False
 
-        for param in self.lm.decoder.block[2:].parameters():
-            param.requires_grad = False
-
-    def forward(self, latent, condition, target_ids=None, generate=False, **generate_kwargs):
+    def forward(self, latent, condition, target_ids=None, target_attention_mask=None, generate=False, **generate_kwargs):
         z = torch.cat((latent, condition), dim=-1)
 
         x = self.MLP(z)
@@ -191,12 +216,19 @@ class Decoder(torch.nn.Module):
         # investigate unpooling layers
         x = x.unsqueeze(1).expand(-1, self.target_seq_length, -1)
 
-        if generate:
-            encoder_outputs = transformers.modeling_outputs.BaseModelOutput(last_hidden_state=x)
-            return self.lm.generate(encoder_outputs=encoder_outputs, **generate_kwargs)
-        else:
-            output = self.lm(encoder_outputs=(x,), labels=target_ids)
-            return output.logits, output.loss
+        if self.lm_name == 'gpt2':
+            if generate:
+                return self.lm.generate(latent_variable=x, **generate_kwargs)
+            else:
+                output = self.lm(input_ids=target_ids, attention_mask=target_attention_mask, labels=target_ids, latent_variable=x)
+                return output.logits, output.loss
+        elif self.lm_name == 't5':
+            if generate:
+                encoder_outputs = transformers.modeling_outputs.BaseModelOutput(last_hidden_state=x)
+                return self.lm.generate(encoder_outputs=encoder_outputs, **generate_kwargs)
+            else:
+                output = self.lm(encoder_outputs=(x,), labels=target_ids)
+                return output.logits, output.loss
 
     def generate(self, latent, condition, **generate_kwargs):
         return self(latent, condition, generate=True, **generate_kwargs)

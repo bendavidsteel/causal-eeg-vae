@@ -45,12 +45,13 @@ def get_n_gen_ancestors(graph, node, num_gens, num_predecessors):
     return ancestors
 
 class NewsDataset(torch_geometric.data.InMemoryDataset):
-    def __init__(self, root, dataset_name='main', graph_context=True, transform=None, pre_transform=None, pre_filter=None):
+    def __init__(self, root, dataset_name='main', graph_context=True, lm_name='gpt2'):
         self.dataset_name = dataset_name
         self.graph_context = graph_context
+        self.lm_name = lm_name
         self.num_data_points = 0
 
-        super().__init__(root, transform, pre_transform, pre_filter)
+        super().__init__(root, None, None, None)
 
         data_save_path = os.path.join(self.processed_dir, 'data.pt')
         graph_data_save_path = os.path.join(self.processed_dir, 'graph_data.pt')
@@ -112,7 +113,13 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
         graph = nx.DiGraph()
 
         bert_tokenizer = transformers.DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
-        t5_tokenizer = transformers.T5TokenizerFast.from_pretrained("google/t5-efficient-tiny")
+
+        if self.lm_name == 't5':
+            lm_tokenizer = transformers.T5TokenizerFast.from_pretrained("google/t5-efficient-tiny")
+        elif self.lm_name == 'gpt2':
+            lm_tokenizer = transformers.GPT2TokenizerFast.from_pretrained("gpt2")
+            # set pad_token_id to unk_token_id -> be careful here as unk_token_id == eos_token_id == bos_token_id
+            lm_tokenizer.pad_token = lm_tokenizer.unk_token
 
         node_mapping = {}
         # add nodes from dataframe
@@ -122,13 +129,13 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
             node_text = node_row['title']
             bert_tokens = bert_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
-            t5_tokens = t5_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
+            lm_tokens = lm_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
 
             graph.add_node(idx, 
                            bert_input_ids=bert_tokens.input_ids,
                            bert_attention_mask=bert_tokens.attention_mask,
-                           t5_input_ids=t5_tokens.input_ids,
-                           t5_attention_mask=t5_tokens.attention_mask)
+                           lm_input_ids=lm_tokens.input_ids,
+                           lm_attention_mask=lm_tokens.attention_mask)
 
         # add edges from dataframe
         print('Loading edges into graph')
@@ -164,11 +171,11 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
             data['target_input_ids'] = torch.tensor(tokens['bert_input_ids'], dtype=torch.long)
             data['target_input_attention_mask'] = torch.tensor(tokens['bert_attention_mask'], dtype=torch.long)
 
-            data['target_output_ids'] = torch.tensor(tokens['t5_input_ids'], dtype=torch.long)
-            data['target_output_attention_mask'] = torch.tensor(tokens['t5_attention_mask'], dtype=torch.long)
+            data['target_output_ids'] = torch.tensor(tokens['lm_input_ids'], dtype=torch.long)
+            data['target_output_attention_mask'] = torch.tensor(tokens['lm_attention_mask'], dtype=torch.long)
 
-            data['decoder_input_ids'] = torch.tensor(graph.nodes[context_node]['t5_input_ids'])
-            data['decoder_attention_mask'] = torch.tensor(graph.nodes[context_node]['t5_attention_mask'])
+            data['decoder_input_ids'] = torch.tensor(graph.nodes[context_node]['lm_input_ids'])
+            data['decoder_attention_mask'] = torch.tensor(graph.nodes[context_node]['lm_attention_mask'])
 
             if self.graph_context:
                 ancestors = get_n_gen_ancestors(graph, node, NUM_GENERATIONS, MAX_TOP_PREDECESSORS)
