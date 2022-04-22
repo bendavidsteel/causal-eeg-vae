@@ -91,7 +91,7 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
     @property
     def raw_file_names(self):
-        return [f"{self.dataset_name}_entity_dag_{data_type}.csv" for data_type in ['nodes', 'edges']]
+        return [file for file in os.listdir(self.raw_dir) if 'nodes' in file or 'edges' in file]
 
     @property
     def processed_file_names(self):
@@ -99,78 +99,87 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
     def process(self):
 
-        # load graph from file
-        nodes_df = pd.read_csv(os.path.join(self.raw_dir, f"{self.dataset_name}_entity_dag_nodes.csv"))
-        edges_df = pd.read_csv(os.path.join(self.raw_dir, f"{self.dataset_name}_entity_dag_edges.csv"))
-
-        # drop nan rows
-        nodes_df = nodes_df.dropna()
-
-        # drop duplicate titles
-        nodes_df = nodes_df.drop_duplicates(subset='title')
-
-        graph = nx.DiGraph()
-
         bert_tokenizer = transformers.DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
         t5_tokenizer = transformers.T5TokenizerFast.from_pretrained("google/t5-efficient-tiny")
 
-        node_mapping = {}
-        # add nodes from dataframe
-        print('Loading nodes into graph')
-        for idx, node_row in tqdm.tqdm(nodes_df.iterrows(), total=len(nodes_df)):
-            node_mapping[node_row['id']] = idx
-
-            node_text = node_row['title']
-            bert_tokens = bert_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
-            t5_tokens = t5_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
-
-            graph.add_node(idx, 
-                           bert_input_ids=bert_tokens.input_ids,
-                           bert_attention_mask=bert_tokens.attention_mask,
-                           t5_input_ids=t5_tokens.input_ids,
-                           t5_attention_mask=t5_tokens.attention_mask)
-
-        # add edges from dataframe
-        print('Loading edges into graph')
-        for idx, edge_row in tqdm.tqdm(edges_df.iterrows(), total=len(edges_df)):
-            if edge_row['old_id'] not in node_mapping or edge_row['new_id'] not in node_mapping:
-                continue
-
-            old_id = node_mapping[edge_row['old_id']]
-            new_id = node_mapping[edge_row['new_id']]
-
-            if graph.has_edge(old_id, new_id):
-                graph[old_id][new_id]['entities'] += 1
-            else:
-                graph.add_edge(old_id, new_id, entities=1)
+        node_file_names = [file for file in os.listdir(self.raw_dir) if 'nodes' in file]
 
         data_list = []
         graph_data_list = []
 
-        # process network into torch compat shape
-        print('Create context/target pairs from graph')
-        for node, tokens in tqdm.tqdm(graph.nodes(data=True), total=graph.number_of_nodes()):
-            if graph.in_degree(node) == 0:
-                continue
+        for node_file_name in node_file_names:
+            edge_file_name = node_file_name.replace('nodes', 'edges')
+            
+            # load graph from file
+            nodes_df = pd.read_csv(os.path.join(self.raw_dir, node_file_name))
+            edges_df = pd.read_csv(os.path.join(self.raw_dir, edge_file_name))
 
-            predecessors = get_top_n_valid_predecessors(graph, node, 1)
-            if len(predecessors) == 0:
-                continue
+            # drop nan rows
+            nodes_df = nodes_df.dropna()
 
-            context_node = predecessors[0]
+            # drop duplicate titles
+            nodes_df = nodes_df.drop_duplicates(subset='title')
 
-            data = {}
+            graph = nx.DiGraph()
 
-            data['target_input_ids'] = torch.tensor(tokens['bert_input_ids'], dtype=torch.long)
-            data['target_input_attention_mask'] = torch.tensor(tokens['bert_attention_mask'], dtype=torch.long)
+            node_mapping = {}
+            # add nodes from dataframe
+            print(f"Loading nodes into graph from {node_file_name}")
+            for idx, node_row in tqdm.tqdm(nodes_df.iterrows(), total=len(nodes_df)):
+                node_mapping[node_row['id']] = idx
 
-            data['target_output_ids'] = torch.tensor(tokens['t5_input_ids'], dtype=torch.long)
-            data['target_output_attention_mask'] = torch.tensor(tokens['t5_attention_mask'], dtype=torch.long)
+                node_text = node_row['title']
+                bert_tokens = bert_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
+                t5_tokens = t5_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
 
-            data['decoder_input_ids'] = torch.tensor(graph.nodes[context_node]['t5_input_ids'])
-            data['decoder_attention_mask'] = torch.tensor(graph.nodes[context_node]['t5_attention_mask'])
+                graph.add_node(idx, 
+                            bert_input_ids=bert_tokens.input_ids,
+                            bert_attention_mask=bert_tokens.attention_mask,
+                            t5_input_ids=t5_tokens.input_ids,
+                            t5_attention_mask=t5_tokens.attention_mask)
 
-            if self.graph_context:
+            # add edges from dataframe
+            print(f"Loading edges into graph from {edge_file_name}")
+            for idx, edge_row in tqdm.tqdm(edges_df.iterrows(), total=len(edges_df)):
+                if edge_row['old_id'] not in node_mapping or edge_row['new_id'] not in node_mapping:
+                    continue
+
+                old_id = node_mapping[edge_row['old_id']]
+                new_id = node_mapping[edge_row['new_id']]
+
+                if graph.has_edge(old_id, new_id):
+                    graph[old_id][new_id]['entities'] += 1
+                else:
+                    graph.add_edge(old_id, new_id, entities=1)
+
+        
+
+            # process network into torch compat shape
+            print('Create context/target pairs from graph')
+            for node, tokens in tqdm.tqdm(graph.nodes(data=True), total=graph.number_of_nodes()):
+                if graph.in_degree(node) == 0:
+                    continue
+
+                predecessors = get_top_n_valid_predecessors(graph, node, 1)
+                if len(predecessors) == 0:
+                    continue
+
+                context_node = predecessors[0]
+
+                data = {}
+
+                data['target_input_ids'] = torch.tensor(tokens['bert_input_ids'], dtype=torch.long)
+                data['target_input_attention_mask'] = torch.tensor(tokens['bert_attention_mask'], dtype=torch.long)
+
+                data['target_output_ids'] = torch.tensor(tokens['t5_input_ids'], dtype=torch.long)
+                data['target_output_attention_mask'] = torch.tensor(tokens['t5_attention_mask'], dtype=torch.long)
+
+                data['decoder_input_ids'] = torch.tensor(graph.nodes[context_node]['t5_input_ids'])
+                data['decoder_attention_mask'] = torch.tensor(graph.nodes[context_node]['t5_attention_mask'])
+
+                data['conditioner_input_ids'] = torch.tensor(graph.nodes[context_node]['bert_input_ids'])
+                data['conditioner_attention_mask'] = torch.tensor(graph.nodes[context_node]['bert_attention_mask'])
+
                 ancestors = get_n_gen_ancestors(graph, node, NUM_GENERATIONS, MAX_TOP_PREDECESSORS)
                 graph_context = nx.induced_subgraph(graph, ancestors).copy()
 
@@ -197,21 +206,15 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
                 graph_context.num_nodes = num_nodes
 
                 graph_data_list.append(graph_context)
-
-            else:
-                data['conditioner_input_ids'] = torch.tensor(graph[context_node]['bert_input_ids'])
-                data['conditioner_attention_mask'] = torch.tensor(graph[context_node]['bert_attention_mask'])
-
-            data_list.append(data)
+                data_list.append(data)
 
 
         data_save_path = os.path.join(self.processed_dir, 'data.pt')
         graph_data_save_path = os.path.join(self.processed_dir, 'graph_data.pt')
 
         torch.save(data_list, data_save_path)
-        if self.graph_context:
-            data, slices = self.collate(graph_data_list)
-            torch.save((data, slices), graph_data_save_path)
+        data, slices = self.collate(graph_data_list)
+        torch.save((data, slices), graph_data_save_path)
 
 
 def load_and_preprocess_dataset(model, dataset_name):

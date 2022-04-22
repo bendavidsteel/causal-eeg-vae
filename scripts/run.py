@@ -11,16 +11,13 @@ import models, dataset
 
 MAX_LOGSTD = 10
 MAX_EPOCHS = 1000
-EARLY_STOPPING_PATIENCE = 20
-
-def get_kl_loss(mu, logstd):
-    logstd = logstd.clamp(max=MAX_LOGSTD)
-    return -0.5 * torch.mean(torch.sum(1 + 2 * logstd - mu**2 - logstd.exp()**2, dim=1))
+EARLY_STOPPING_PATIENCE = 100
 
 
 def train(model, train_data, val_data, device, checkpoint_path, resume, graph_context):
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
     model.train()
 
     min_val_loss = 999999
@@ -46,13 +43,12 @@ def train(model, train_data, val_data, device, checkpoint_path, resume, graph_co
 
             optimizer.zero_grad()
 
-            logits, recon_loss, means, log_var, z = model(conditioner_context, 
-                                                          target_input_ids=target_input_ids, 
-                                                          target_attention_mask=target_input_attention_mask,
-                                                          target_output_ids=target_output_ids)
+            logits, recon_loss, embedding_loss, perplexity = model(conditioner_context, 
+                                                                   target_input_ids=target_input_ids, 
+                                                                   target_attention_mask=target_input_attention_mask,
+                                                                   target_output_ids=target_output_ids)
             
-            kl_loss = get_kl_loss(means, log_var)
-            loss = recon_loss + kl_loss
+            loss = recon_loss + embedding_loss
             loss.backward()
             optimizer.step()
             batch_loss = float(loss)
@@ -75,17 +71,19 @@ def train(model, train_data, val_data, device, checkpoint_path, resume, graph_co
                     conditioner_context = (batch['conditioner_input_ids'].to(device), batch['conditioner_attention_mask'].to(device))
 
                 
-                logits, recon_loss, means, log_var, z = model(conditioner_context, 
-                                                              target_input_ids=target_input_ids, 
-                                                              target_attention_mask=target_attention_mask,
-                                                              target_output_ids=target_output_ids)
+                logits, recon_loss, embedding_loss, perplexity = model(conditioner_context, 
+                                                                       target_input_ids=target_input_ids, 
+                                                                       target_attention_mask=target_attention_mask,
+                                                                       target_output_ids=target_output_ids)
                 
-                kl_loss = get_kl_loss(means, log_var)
-                loss = recon_loss + kl_loss
+                loss = recon_loss + embedding_loss
 
                 val_loss += float(loss)
 
         val_loss /= batch_idx
+
+        # potentially update learning rate
+        scheduler.step(val_loss)
 
         # save best model so far
         if val_loss < min_val_loss:
@@ -183,22 +181,27 @@ def gen(model, data, device, graph_context, checkpoint_path):
             for i, beam_output in enumerate(beam_outputs):
                 print(f"{i}: {t5_tokenizer.decode(beam_output, skip_special_tokens=True)}")
 
-
 def main(args):
+
+    # ensure checkpoint dir exists
+    if not os.path.exists(args.checkpoint_path):
+        os.makedirs(args.checkpoint_path)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     train_dataset, val_dataset, test_dataset = dataset.load_and_preprocess_dataset(args.model, args.dataset)
 
-    encoder_layer_sizes = [128, 128]
-    latent_size = 4
-    decoder_layer_sizes = [128, 128]
-    conditioner_layer_sizes = [128, 128]
-    target_sequence_length = 300
+    encoder_layer_sizes = [2048, 2048, 2048]
+    latent_size = 8
+    num_latent_embeddings = 512
+    beta = 0.25
+    decoder_layer_sizes = [2048, 2048, 2048]
+    conditioner_layer_sizes = [2048, 2048, 2048]
+    target_sequence_length = 100
     if args.model == 'gcvae':
-        model = models.GCVAE(encoder_layer_sizes, latent_size, decoder_layer_sizes, conditioner_layer_sizes, target_sequence_length)
+        model = models.GCVAE(encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_sequence_length)
     elif args.model == 'cvae':
-        model = models.CVAE(encoder_layer_sizes, latent_size, decoder_layer_sizes, conditioner_layer_sizes, target_sequence_length)
+        model = models.CVAE(encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_sequence_length)
 
     model = model.to(device)
 
