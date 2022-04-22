@@ -101,7 +101,7 @@ def train(model, train_data, val_data, device, checkpoint_path, resume, graph_co
         print(f'Epoch: {epoch:03d}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}')
 
 
-def test(model, data, device, graph_context, checkpoint_path):
+def test(model, data, device, graph_context, checkpoint_path, lm_name, gen_method):
 
     tokenizer = transformers.GPT2TokenizerFast.from_pretrained("gpt2")
     model.load_state_dict(torch.load(os.path.join(checkpoint_path, 'best_model.pt')))
@@ -121,15 +121,26 @@ def test(model, data, device, graph_context, checkpoint_path):
             latent_size = model.latent_size
             latent = torch.nn.randn([1, latent_size]).to(device)
 
-            beam_outputs = model.generate(
-                conditioner_context,
-                latent=latent, 
-                max_length=50, 
-                num_beams=5, 
-                no_repeat_ngram_size=2, 
-                num_return_sequences=5, 
-                early_stopping=True
-            )
+            if gen_method == 'topk':
+                model_outputs = model.generate(
+                    latent,
+                    conditioner_context,
+                    prompt=lm_tokenizer.bos_token if lm_name == 'gpt2' else None,
+                    do_sample=True, 
+                    max_length=101, 
+                    top_k=50
+                )
+            elif gen_method == 'beam':
+                model_outputs = model.generate(
+                    latent,
+                    conditioner_context,
+                    prompt=lm_tokenizer.bos_token if lm_name == 'gpt2' else None,
+                    max_length=101, 
+                    num_beams=5, 
+                    no_repeat_ngram_size=2, 
+                    num_return_sequences=5, 
+                    early_stopping=True
+                )
 
             inferences = []
             for logits_single in logits:
