@@ -17,8 +17,7 @@ class BaseCVAE(torch.nn.Module):
         context_embedding_size = conditioner_layer_sizes[-1]
 
         self.latent_size = latent_size
-        self.encoder = Encoder(embedding, embedding_hidden_size, encoder_layer_sizes, latent_size, context_embedding_size)
-        self.decoder = Decoder(decoder_layer_sizes, latent_size, context_embedding_size, target_seq_length)
+        
         # pass continuous latent vector through discretization bottleneck
         self.vector_quantization = quantizer.VectorQuantizer(num_latent_embeddings, latent_size, beta)
 
@@ -60,28 +59,37 @@ def get_embedding():
     embedding = transformers.DistilBertModel.from_pretrained("distilbert-base-uncased", config=config)
 
     # freeze weights
-    for param in embedding.parameters():
+    for param in embedding.embeddings.parameters():
+        param.requires_grad = False
+
+    for param in embedding.transformer.layer[:4].parameters():
         param.requires_grad = False
 
     return embedding, embedding_hidden_size
 
 class CVAE(BaseCVAE):
-    def __init__(self, encoder_layer_sizes, latent_size, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length):
+    def __init__(self, encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length):
 
         embedding, embedding_hidden_size = get_embedding()
 
-        super().__init__(embedding, embedding_hidden_size, encoder_layer_sizes, latent_size, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length)
+        super().__init__(embedding, embedding_hidden_size, encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length)
 
         self.conditioner = Conditioner(embedding, embedding_hidden_size, conditioner_layer_sizes)
+        context_embedding_size = conditioner_layer_sizes[-1]
+        self.encoder = SequenceEncoder(embedding, embedding_hidden_size, encoder_layer_sizes, latent_size, embedding_hidden_size)
+        self.decoder = SequenceDecoder(decoder_layer_sizes, latent_size, embedding_hidden_size, target_seq_length)
 
 class GCVAE(BaseCVAE):
-    def __init__(self, encoder_layer_sizes, latent_size, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length):
+    def __init__(self, encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length):
         
         embedding, embedding_hidden_size = get_embedding()
         
-        super().__init__(embedding, embedding_hidden_size, encoder_layer_sizes, latent_size, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length)
+        super().__init__(embedding, embedding_hidden_size, encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length)
 
         self.conditioner = GraphConditioner(embedding, embedding_hidden_size, conditioner_layer_sizes)
+        context_embedding_size = conditioner_layer_sizes[-1]
+        self.encoder = Encoder(embedding, embedding_hidden_size, encoder_layer_sizes, latent_size, context_embedding_size)
+        self.decoder = Decoder(decoder_layer_sizes, latent_size, context_embedding_size, target_seq_length)
 
 
 class GraphConditioner(torch.nn.Module):
@@ -90,24 +98,27 @@ class GraphConditioner(torch.nn.Module):
         super().__init__()
 
         self.embedding = embedding
+        self.attn = torch.nn.Linear(embedding_hidden_size, 1)
 
         graph_layers = []
 
-        for i, (in_size, out_size) in enumerate(zip([embedding_hidden_size] + graph_layer_sizes[:-1], graph_layer_sizes)):
+        for in_size, out_size in zip([embedding_hidden_size] + graph_layer_sizes[:-1], graph_layer_sizes):
             graph_layers.append((torch_geometric.nn.GATConv(in_size, out_size), 'x, edge_index -> x'))
+            graph_layers.append((torch_geometric.nn.LayerNorm(out_size), 'x, batch -> x'))
             graph_layers.append((torch.nn.ReLU(inplace=True)))
-            # TODO add batch norm here ?
 
-        self.graph_sequential_model = torch_geometric.nn.Sequential('x, edge_index', graph_layers)
+        self.graph_sequential_model = torch_geometric.nn.Sequential('x, edge_index, batch', graph_layers)
 
         gate_nn = torch.nn.Linear(graph_layer_sizes[-1], 1)
         self.pooling_layer = torch_geometric.nn.GlobalAttention(gate_nn)
 
     def forward(self, input):
         output = self.embedding(input_ids=input.input_ids, attention_mask=input.attention_mask)
-        # get average of sequence
-        x = torch.mean(output.last_hidden_state, 1)
-        x = self.graph_sequential_model(x, input.edge_index)
+        # use attention to pool weights
+        attn_weights = self.attn(output.last_hidden_state)
+        x = torch.bmm(output.last_hidden_state.permute(0, 2, 1), attn_weights).squeeze(2)
+
+        x = self.graph_sequential_model(x, input.edge_index, input.input_ids_batch)
         return self.pooling_layer(x, batch=input.input_ids_batch, size=input.num_graphs)
 
 class Conditioner(torch.nn.Module):
@@ -117,18 +128,11 @@ class Conditioner(torch.nn.Module):
         
         self.embedding = embedding
 
-        self.layers = torch.nn.Sequential()
-
-        for i, (in_size, out_size) in enumerate(zip([embedding_hidden_size] + layer_sizes[:-1], layer_sizes)):
-            self.layers.add_module(name=f"L{i}", module=torch.nn.Linear(in_size, out_size))
-            self.layers.add_module(name=f"A{i}", module=torch.nn.ReLU())
-            self.layers.add_module(name=f"D{i}", module=torch.nn.Dropout())
-
     def forward(self, input):
         input_ids, attention_mask = input
         output = self.embedding(input_ids=input_ids, attention_mask=attention_mask)
-        x = torch.mean(output.last_hidden_state, 1)
-        return self.layers(x)
+
+        return output.last_hidden_state
 
 
 class Encoder(torch.nn.Module):
@@ -143,15 +147,54 @@ class Encoder(torch.nn.Module):
 
         for i, (in_size, out_size) in enumerate(zip([embedding_hidden_size + context_embedding_size] + layer_sizes, layer_sizes + [latent_size])):
             self.MLP.add_module(name=f"L{i}", module=torch.nn.Linear(in_size, out_size))
+            self.MLP.add_module(name=f"N{i}", module=torch.nn.LayerNorm(out_size))
             self.MLP.add_module(name=f"A{i}", module=torch.nn.ReLU())
             self.MLP.add_module(name=f"D{i}", module=torch.nn.Dropout())
 
+        self.attn = torch.nn.Linear(embedding_hidden_size, 1)
+
     def forward(self, input_ids, attention_mask, condition):
         output = self.embedding(input_ids=input_ids, attention_mask=attention_mask)
-        # get verage of final hidden states
-        x = torch.mean(output.last_hidden_state, 1)
+        # use attention to pool weights
+        attn_weights = self.attn(output.last_hidden_state)
+        x = torch.bmm(output.last_hidden_state.permute(0, 2, 1), attn_weights).squeeze(2)
 
         x = torch.cat((x, condition), dim=-1)
+
+        x = self.MLP(x)
+
+        return x
+
+
+class SequenceEncoder(torch.nn.Module):
+
+    def __init__(self, embedding, embedding_hidden_size, layer_sizes, latent_size, context_embedding_size):
+
+        super().__init__()
+
+        self.embedding = embedding
+
+        self.MLP = torch.nn.Sequential()
+
+        for i, (in_size, out_size) in enumerate(zip([embedding_hidden_size + context_embedding_size] + layer_sizes, layer_sizes + [latent_size])):
+            self.MLP.add_module(name=f"L{i}", module=torch.nn.Linear(in_size, out_size))
+            self.MLP.add_module(name=f"N{i}", module=torch.nn.LayerNorm(out_size))
+            self.MLP.add_module(name=f"A{i}", module=torch.nn.ReLU())
+            self.MLP.add_module(name=f"D{i}", module=torch.nn.Dropout())
+
+        self.attn = torch.nn.Linear(embedding_hidden_size, 1)
+        self.condition_attn = torch.nn.Linear(context_embedding_size, 1)
+
+    def forward(self, input_ids, attention_mask, condition):
+        output = self.embedding(input_ids=input_ids, attention_mask=attention_mask)
+        # use attention to pool weights
+        attn_weights = self.attn(output.last_hidden_state)
+        x = torch.bmm(output.last_hidden_state.permute(0, 2, 1), attn_weights).squeeze(2)
+
+        cond_attn_weights = self.condition_attn(condition)
+        cond = torch.bmm(condition.permute(0, 2, 1), cond_attn_weights).squeeze(2)
+
+        x = torch.cat((x, cond), dim=-1)
 
         x = self.MLP(x)
 
@@ -168,9 +211,9 @@ class Decoder(torch.nn.Module):
         self.lm_name = lm_name
 
         if lm_name == 't5':
-            config = transformers.T5Config.from_pretrained("google/t5-efficient-tiny")
-            lm_hidden_size = config.d_model
-            self.lm = transformers.T5ForConditionalGeneration.from_pretrained("google/t5-efficient-tiny")
+            config = transformers.T5Config.from_pretrained("google/t5-efficient-base")
+            self.lm_hidden_size = config.d_model
+            self.lm = transformers.T5ForConditionalGeneration.from_pretrained("google/t5-efficient-base")
 
             # later weights
             for param in self.lm.lm_head.parameters():
@@ -181,7 +224,7 @@ class Decoder(torch.nn.Module):
 
         elif lm_name == 'gpt2':
             config = transformers.GPT2Config.from_pretrained("distilgpt2")
-            lm_hidden_size = config.n_embd
+            self.lm_hidden_size = config.n_embd
 
             self.lm = gpt2.GPT2LMHeadModel.from_pretrained("distilgpt2", config=config)
             # freeze embedding weights
@@ -202,19 +245,84 @@ class Decoder(torch.nn.Module):
 
         self.MLP = torch.nn.Sequential()
 
-        for i, (in_size, out_size) in enumerate(zip([latent_size + context_embedding_size] + layer_sizes, layer_sizes + [lm_hidden_size])):
+        self.lstm_num_layers = 2
+
+        for i, (in_size, out_size) in enumerate(zip([latent_size + context_embedding_size] + layer_sizes, layer_sizes + [self.lm_hidden_size])):
             self.MLP.add_module(name=f"L{i}", module=torch.nn.Linear(in_size, out_size))
+            self.MLP.add_module(name=f"N{i}", module=torch.nn.LayerNorm(out_size))
             self.MLP.add_module(name=f"A{i}", module=torch.nn.ReLU())
             self.MLP.add_module(name=f"D{i}", module=torch.nn.Dropout())
 
+        self.lstm = torch.nn.LSTM(self.lm_hidden_size, self.lm_hidden_size, self.lstm_num_layers, batch_first=True)
+        
 
     def forward(self, latent, condition, target_ids=None, target_attention_mask=None, generate=False, **generate_kwargs):
         z = torch.cat((latent, condition), dim=-1)
 
         x = self.MLP(z)
-        # TODO create other options?
-        # investigate unpooling layers
-        x = x.unsqueeze(1).expand(-1, self.target_seq_length, -1)
+
+        lstm_input_output = x.unsqueeze(1)
+
+        # TODO implement multi head attention
+
+        device = latent.device
+        num_batch = latent.size(0)
+        lstm_output = torch.zeros((num_batch, self.target_seq_length, self.lm_hidden_size)).to(device)
+        lstm_hidden_state = torch.zeros((self.lstm_num_layers, num_batch, self.lm_hidden_size)).to(device)
+        lstm_cell_state = torch.zeros((self.lstm_num_layers, num_batch, self.lm_hidden_size)).to(device)
+        for seq_idx in range(self.target_seq_length):
+            lstm_input_output, (lstm_hidden_state, lstm_cell_state) = self.lstm(lstm_input_output, (lstm_hidden_state, lstm_cell_state))
+            lstm_output[:, seq_idx, :] = lstm_input_output.squeeze(1)
+
+        if generate:
+            encoder_outputs = transformers.modeling_outputs.BaseModelOutput(last_hidden_state=lstm_output)
+            return self.lm.generate(encoder_outputs=encoder_outputs, **generate_kwargs)
+        else:
+            output = self.lm(encoder_outputs=(lstm_output,), labels=target_ids)
+            return output.logits, output.loss
+
+    def generate(self, latent, condition, **generate_kwargs):
+        return self(latent, condition, generate=True, **generate_kwargs)
+
+
+
+class SequenceDecoder(torch.nn.Module):
+
+    def __init__(self, layer_sizes, latent_size, context_embedding_size, target_seq_length):
+        super().__init__()
+
+        self.target_seq_length = target_seq_length
+
+        config = transformers.T5Config.from_pretrained("google/t5-efficient-large")
+        self.lm_hidden_size = config.d_model
+
+        self.MLP = torch.nn.Sequential()
+
+        for i, (in_size, out_size) in enumerate(zip([latent_size] + layer_sizes[:-1], layer_sizes)):
+            self.MLP.add_module(name=f"L{i}", module=torch.nn.Linear(in_size, out_size))
+            self.MLP.add_module(name=f"N{i}", module=torch.nn.LayerNorm(out_size))
+            self.MLP.add_module(name=f"A{i}", module=torch.nn.ReLU())
+            self.MLP.add_module(name=f"D{i}", module=torch.nn.Dropout())
+
+        self.final_linear = torch.nn.Linear(layer_sizes[-1] + context_embedding_size, self.lm_hidden_size)
+
+        self.lm = transformers.T5ForConditionalGeneration.from_pretrained("google/t5-efficient-large")
+        
+        # later weights
+        for param in self.lm.lm_head.parameters():
+            param.requires_grad = False
+
+        for param in self.lm.decoder.block[2:].parameters():
+            param.requires_grad = False
+
+    def forward(self, latent, condition, target_ids=None, generate=False, **generate_kwargs):
+        
+        latent = self.MLP(latent)
+        
+        z = torch.cat((latent.unsqueeze(1).expand(-1, condition.size(1), -1), condition), dim=-1)
+
+        x = self.final_linear(z)
+        x = torch.nn.functional.relu(x)
 
         if self.lm_name == 'gpt2':
             if generate:
