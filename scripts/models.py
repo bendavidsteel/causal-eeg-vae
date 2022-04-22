@@ -68,7 +68,7 @@ def get_embedding():
     return embedding, embedding_hidden_size
 
 class CVAE(BaseCVAE):
-    def __init__(self, encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length):
+    def __init__(self, lm_name, encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length):
 
         embedding, embedding_hidden_size = get_embedding()
 
@@ -77,10 +77,10 @@ class CVAE(BaseCVAE):
         self.conditioner = Conditioner(embedding, embedding_hidden_size, conditioner_layer_sizes)
         context_embedding_size = conditioner_layer_sizes[-1]
         self.encoder = SequenceEncoder(embedding, embedding_hidden_size, encoder_layer_sizes, latent_size, embedding_hidden_size)
-        self.decoder = SequenceDecoder(decoder_layer_sizes, latent_size, embedding_hidden_size, target_seq_length)
+        self.decoder = SequenceDecoder(decoder_layer_sizes, latent_size, embedding_hidden_size, target_seq_length, lm_name)
 
 class GCVAE(BaseCVAE):
-    def __init__(self, encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length):
+    def __init__(self, lm_name, encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_seq_length):
         
         embedding, embedding_hidden_size = get_embedding()
         
@@ -89,7 +89,7 @@ class GCVAE(BaseCVAE):
         self.conditioner = GraphConditioner(embedding, embedding_hidden_size, conditioner_layer_sizes)
         context_embedding_size = conditioner_layer_sizes[-1]
         self.encoder = Encoder(embedding, embedding_hidden_size, encoder_layer_sizes, latent_size, context_embedding_size)
-        self.decoder = Decoder(decoder_layer_sizes, latent_size, context_embedding_size, target_seq_length)
+        self.decoder = Decoder(decoder_layer_sizes, latent_size, context_embedding_size, target_seq_length, lm_name)
 
 
 class GraphConditioner(torch.nn.Module):
@@ -209,11 +209,10 @@ class Decoder(torch.nn.Module):
         self.target_seq_length = target_seq_length
 
         self.lm_name = lm_name
-
         if lm_name == 't5':
-            config = transformers.T5Config.from_pretrained("google/t5-efficient-base")
+            config = transformers.T5Config.from_pretrained("google/t5-efficient-large")
             self.lm_hidden_size = config.d_model
-            self.lm = transformers.T5ForConditionalGeneration.from_pretrained("google/t5-efficient-base")
+            self.lm = transformers.T5ForConditionalGeneration.from_pretrained("google/t5-efficient-large")
 
             # later weights
             for param in self.lm.lm_head.parameters():
@@ -295,13 +294,44 @@ class Decoder(torch.nn.Module):
 
 class SequenceDecoder(torch.nn.Module):
 
-    def __init__(self, layer_sizes, latent_size, context_embedding_size, target_seq_length):
+    def __init__(self, layer_sizes, latent_size, context_embedding_size, target_seq_length, lm_name):
         super().__init__()
 
         self.target_seq_length = target_seq_length
 
-        config = transformers.T5Config.from_pretrained("google/t5-efficient-large")
-        self.lm_hidden_size = config.d_model
+        self.lm_name = lm_name
+        if lm_name == 't5':
+            config = transformers.T5Config.from_pretrained("google/t5-efficient-large")
+            self.lm_hidden_size = config.d_model
+            self.lm = transformers.T5ForConditionalGeneration.from_pretrained("google/t5-efficient-large")
+
+            # later weights
+            for param in self.lm.lm_head.parameters():
+                param.requires_grad = False
+
+            for param in self.lm.decoder.block[2:].parameters():
+                param.requires_grad = False
+
+        elif lm_name == 'gpt2':
+            config = transformers.GPT2Config.from_pretrained("distilgpt2")
+            self.lm_hidden_size = config.n_embd
+
+            self.lm = gpt2.GPT2LMHeadModel.from_pretrained("distilgpt2", config=config)
+            # freeze embedding weights
+            for param in self.lm.transformer.wte.parameters():
+                param.requires_grad = False
+
+            # freeze position weights
+            for param in self.lm.transformer.wpe.parameters():
+                param.requires_grad = False
+
+            # freeze later transformer blocks
+            for param in self.lm.transformer.h[1:].parameters():
+                param.requires_grad = False
+
+            # freeze lm head
+            for param in self.lm.lm_head.parameters():
+                param.requires_grad = False
 
         self.MLP = torch.nn.Sequential()
 
@@ -312,15 +342,7 @@ class SequenceDecoder(torch.nn.Module):
             self.MLP.add_module(name=f"D{i}", module=torch.nn.Dropout())
 
         self.final_linear = torch.nn.Linear(layer_sizes[-1] + context_embedding_size, self.lm_hidden_size)
-
-        self.lm = transformers.T5ForConditionalGeneration.from_pretrained("google/t5-efficient-large")
         
-        # later weights
-        for param in self.lm.lm_head.parameters():
-            param.requires_grad = False
-
-        for param in self.lm.decoder.block[2:].parameters():
-            param.requires_grad = False
 
     def forward(self, latent, condition, target_ids=None, target_attention_mask=None, generate=False, prompt=None, **generate_kwargs):
         
