@@ -144,8 +144,12 @@ def test(model, data, device, graph_context, checkpoint_path):
     print(f"Average bleu score is {avg_bleu_score}")
 
 
-def gen(model, data, device, graph_context, checkpoint_path):
-    t5_tokenizer = transformers.T5TokenizerFast.from_pretrained("google/t5-efficient-tiny")
+def gen(model, data, device, graph_context, checkpoint_path, lm_name, gen_method):
+    if lm_name == 't5':
+        lm_tokenizer = transformers.T5TokenizerFast.from_pretrained("google/t5-efficient-tiny")
+    elif lm_name == 'gpt2':
+        lm_tokenizer = transformers.GPT2TokenizerFast.from_pretrained("gpt2")
+    
     bert_tokenizer = transformers.DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
     model.load_state_dict(torch.load(os.path.join(checkpoint_path, 'best_model.pt')))
 
@@ -163,23 +167,35 @@ def gen(model, data, device, graph_context, checkpoint_path):
             batch_size = decoder_input_ids.shape[0]
             latent_size = model.latent_size
             latent = torch.normal(0, 1, size=[batch_size, latent_size]).to(device)
-            beam_outputs = model.generate(
-                latent,
-                conditioner_context,
-                max_length=101, 
-                num_beams=5, 
-                no_repeat_ngram_size=2, 
-                num_return_sequences=5, 
-                early_stopping=True
-            )
+            
+            if gen_method == 'topk':
+                model_outputs = model.generate(
+                    latent,
+                    conditioner_context,
+                    prompt=lm_tokenizer.bos_token if lm_name == 'gpt2' else None,
+                    do_sample=True, 
+                    max_length=101, 
+                    top_k=50
+                )
+            elif gen_method == 'beam':
+                model_outputs = model.generate(
+                    latent,
+                    conditioner_context,
+                    prompt=lm_tokenizer.bos_token if lm_name == 'gpt2' else None,
+                    max_length=101, 
+                    num_beams=5, 
+                    no_repeat_ngram_size=2, 
+                    num_return_sequences=5, 
+                    early_stopping=True
+                )
 
             print("Context:\n" + 100 * '-')
-            print(t5_tokenizer.decode(decoder_input_ids[0], skip_special_tokens=True))
+            print(lm_tokenizer.decode(decoder_input_ids[0], skip_special_tokens=True))
             print("Target:\n" + 100 * '-')
             print(bert_tokenizer.decode(target_input_ids[0], skip_special_tokens=True))
             print("Output:\n" + 100 * '-')
-            for i, beam_output in enumerate(beam_outputs):
-                print(f"{i}: {t5_tokenizer.decode(beam_output, skip_special_tokens=True)}")
+            for i, beam_output in enumerate(model_outputs):
+                print(f"{i}: {lm_tokenizer.decode(beam_output, skip_special_tokens=True)}")
 
 def main(args):
 
@@ -199,9 +215,9 @@ def main(args):
     conditioner_layer_sizes = [2048, 2048, 2048]
     target_sequence_length = 100
     if args.model == 'gcvae':
-        model = models.GCVAE(encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_sequence_length)
+        model = models.GCVAE(args.lm_name, encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_sequence_length)
     elif args.model == 'cvae':
-        model = models.CVAE(encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_sequence_length)
+        model = models.CVAE(args.lm_name, encoder_layer_sizes, latent_size, num_latent_embeddings, beta, decoder_layer_sizes, conditioner_layer_sizes, target_sequence_length)
 
     model = model.to(device)
 
@@ -213,11 +229,11 @@ def main(args):
     elif args.mode == 'test':
         test_dataloader = torch_geometric.loader.DataLoader(test_dataset, batch_size=args.batch_size, follow_batch=['input_ids', 'attention_mask'])
 
-        test(model, test_dataloader, device, args.model == 'gcvae', args.checkpoint_path)
+        test(model, test_dataloader, device, args.model == 'gcvae', args.checkpoint_path, args.lm_name, args.gen_method)
     elif args.mode == 'gen':
         test_dataloader = torch_geometric.loader.DataLoader(test_dataset, batch_size=1, follow_batch=['input_ids', 'attention_mask'])
 
-        gen(model, test_dataloader, device, args.model == 'gcvae', args.checkpoint_path)
+        gen(model, test_dataloader, device, args.model == 'gcvae', args.checkpoint_path, args.lm_name, args.gen_method)
 
 if __name__ == '__main__':
 
@@ -228,6 +244,8 @@ if __name__ == '__main__':
     parser.add_argument('--checkpoint-path', type=str, default='./checkpoints')
     parser.add_argument('--resume', type=bool, default=False)
     parser.add_argument('--batch-size', type=int, default=32)
+    parser.add_argument('--lm-name', type=str, default='gpt2')
+    parser.add_argument('--gen-method', type=str, default='topk')
     args = parser.parse_args()
 
     main(args)

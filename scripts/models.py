@@ -21,10 +21,10 @@ class BaseCVAE(torch.nn.Module):
         # pass continuous latent vector through discretization bottleneck
         self.vector_quantization = quantizer.VectorQuantizer(num_latent_embeddings, latent_size, beta)
 
-    def forward(self, conditioner_context, target_input_ids=None, target_input_attention_mask=None, target_output_ids=None, latent=None, generate=False, **generate_kwargs):
+    def forward(self, conditioner_context, target_input_ids=None, target_input_attention_mask=None, target_output_ids=None, latent=None, generate=False, prompt=None, **generate_kwargs):
 
         if generate:
-            return self._generate(latent, conditioner_context, **generate_kwargs)
+            return self._generate(latent, conditioner_context, prompt=prompt, **generate_kwargs)
 
         condition = self.conditioner(conditioner_context)
         latent = self.encoder(target_input_ids, target_input_attention_mask, condition)
@@ -42,14 +42,14 @@ class BaseCVAE(torch.nn.Module):
 
         return mu + eps * std
 
-    def generate(self, latent, conditioner_context, **generate_kwargs):
-        return self(conditioner_context, latent=latent, generate=True, **generate_kwargs)
+    def generate(self, latent, conditioner_context, prompt=None, **generate_kwargs):
+        return self(conditioner_context, latent=latent, generate=True, prompt=prompt, **generate_kwargs)
 
-    def _generate(self, latent, conditioner_context, **generate_kwargs):
+    def _generate(self, latent, conditioner_context, prompt=None, **generate_kwargs):
 
         _, latent_quantized, _, _, _ = self.vector_quantization(latent)
         condition = self.conditioner(conditioner_context)
-        outputs = self.decoder.generate(latent_quantized, condition, **generate_kwargs)
+        outputs = self.decoder.generate(latent_quantized, condition, prompt=prompt, **generate_kwargs)
 
         return outputs
 
@@ -256,7 +256,7 @@ class Decoder(torch.nn.Module):
         self.lstm = torch.nn.LSTM(self.lm_hidden_size, self.lm_hidden_size, self.lstm_num_layers, batch_first=True)
         
 
-    def forward(self, latent, condition, target_ids=None, target_attention_mask=None, generate=False, **generate_kwargs):
+    def forward(self, latent, condition, target_ids=None, target_attention_mask=None, generate=False, prompt=None, **generate_kwargs):
         z = torch.cat((latent, condition), dim=-1)
 
         x = self.MLP(z)
@@ -274,15 +274,22 @@ class Decoder(torch.nn.Module):
             lstm_input_output, (lstm_hidden_state, lstm_cell_state) = self.lstm(lstm_input_output, (lstm_hidden_state, lstm_cell_state))
             lstm_output[:, seq_idx, :] = lstm_input_output.squeeze(1)
 
-        if generate:
-            encoder_outputs = transformers.modeling_outputs.BaseModelOutput(last_hidden_state=lstm_output)
-            return self.lm.generate(encoder_outputs=encoder_outputs, **generate_kwargs)
-        else:
-            output = self.lm(encoder_outputs=(lstm_output,), labels=target_ids)
-            return output.logits, output.loss
+        if self.lm_name == 'gpt2':
+            if generate:
+                return self.lm.generate(input_ids=prompt, latent_variable=lstm_output, **generate_kwargs)
+            else:
+                output = self.lm(input_ids=target_ids, attention_mask=target_attention_mask, labels=target_ids, latent_variable=lstm_output)
+                return output.logits, output.loss
+        elif self.lm_name == 't5':
+            if generate:
+                encoder_outputs = transformers.modeling_outputs.BaseModelOutput(last_hidden_state=lstm_output)
+                return self.lm.generate(encoder_outputs=encoder_outputs, **generate_kwargs)
+            else:
+                output = self.lm(encoder_outputs=(lstm_output,), labels=target_ids)
+                return output.logits, output.loss
 
-    def generate(self, latent, condition, **generate_kwargs):
-        return self(latent, condition, generate=True, **generate_kwargs)
+    def generate(self, latent, condition, prompt=None, **generate_kwargs):
+        return self(latent, condition, generate=True, prompt=prompt, **generate_kwargs)
 
 
 
@@ -315,7 +322,7 @@ class SequenceDecoder(torch.nn.Module):
         for param in self.lm.decoder.block[2:].parameters():
             param.requires_grad = False
 
-    def forward(self, latent, condition, target_ids=None, generate=False, **generate_kwargs):
+    def forward(self, latent, condition, target_ids=None, target_attention_mask=None, generate=False, prompt=None, **generate_kwargs):
         
         latent = self.MLP(latent)
         
@@ -326,7 +333,7 @@ class SequenceDecoder(torch.nn.Module):
 
         if self.lm_name == 'gpt2':
             if generate:
-                return self.lm.generate(latent_variable=x, **generate_kwargs)
+                return self.lm.generate(input_ids=prompt, latent_variable=x, **generate_kwargs)
             else:
                 output = self.lm(input_ids=target_ids, attention_mask=target_attention_mask, labels=target_ids, latent_variable=x)
                 return output.logits, output.loss
@@ -338,5 +345,5 @@ class SequenceDecoder(torch.nn.Module):
                 output = self.lm(encoder_outputs=(x,), labels=target_ids)
                 return output.logits, output.loss
 
-    def generate(self, latent, condition, **generate_kwargs):
-        return self(latent, condition, generate=True, **generate_kwargs)
+    def generate(self, latent, condition, prompt=None, **generate_kwargs):
+        return self(latent, condition, generate=True, prompt=prompt, **generate_kwargs)
