@@ -11,13 +11,14 @@ NUM_SENTENCES = 3
 MAX_TOKENS = 300
 MAX_TOP_PREDECESSORS = 3
 NUM_GENERATIONS = 3
+MIN_COMMON_ENTITIES = 4
 
 def get_top_n_valid_predecessors(graph, node, n):
     predecessors = graph.predecessors(node)
     predec_weights = []
     for predecessor in predecessors:
         num_entities = graph[predecessor][node]['entities']
-        if num_entities > 1:
+        if num_entities >= MIN_COMMON_ENTITIES:
             predec_weights.append((predecessor, num_entities))
 
     sorted_predecessors = [predec[0] for predec in sorted(predec_weights, key=lambda x: x[1], reverse=True)]
