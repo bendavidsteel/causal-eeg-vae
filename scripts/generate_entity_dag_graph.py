@@ -1,3 +1,4 @@
+import datetime
 import os
 
 import networkx as nx
@@ -21,7 +22,7 @@ def main():
     #}
 
     db_name = 'political_events'
-    db_table_in = 'reuters_news'
+    db_table_in = 'reuters_news_reduced'
 
     this_dir_path = os.path.dirname(os.path.abspath(__file__))
     data_path = os.path.join(this_dir_path, '..', 'data')
@@ -29,22 +30,30 @@ def main():
     if not os.path.exists(data_path):
         os.mkdir(data_path)
 
-    #mongo_source = sources.MongoDB(db_connection_string, db_name, db_table_in, partition_size_mb=64)
-    mongo_source = sources.CSV('/root/google_protest_news.csv')
-    collector = collect.Collector(mongo_source)
+    mongo_source = sources.news.MongoDB(db_connection_string, db_name, db_table_in, partition_size_mb=16)
+    #mongo_source = sources.news.CSV('/root/google_protest_news.csv')
 
-    graph_constructor = graphs.Graph(nl_processor)
-    graph_constructor.build_entity_dag()
 
-    #runner = run.Runner(graph_constructor, master_url=master_url, num_executors=2, executor_cores=22, executor_memory='240g', driver_memory='160g', spark_conf=spark_conf)
-    runner = run.Runner(graph_constructor)
-    G, map_df = runner.get_obj()
+    start_date = datetime.date(2007, 1, 1)
+    end_date = datetime.date(2016, 1, 1) - datetime.timedelta(days=1)
+    collector = collect.Collector(mongo_source) \
+        .in_date_range(start_date, end_date)
+
+    nl_processor = nlp.NLP(collector) \
+        .get_entities(blacklist_entities=['.*reuters.*', 'free', 'register'], max_string_search=1000)
+
+    graph_constructor = graphs.Graph(nl_processor) \
+        .build_entity_dag()
+
+    #runner = run.Runner(graph_constructor, master_url=master_url, num_executors=2, executor_cores=22, executor_memory='64g', driver_memory='64g', spark_conf=spark_conf)
+    runner = run.Runner(graph_constructor, driver_cores=24, driver_memory='64g')
+    nodes, edges = runner.to_pandas()
     
-    graph_path = os.path.join(data_path, 'all_articles.edgelist')
-    map_path = os.path.join(data_path, 'all_article_nodes.map')
+    node_path = os.path.join(data_path, '0715_entity_dag_nodes.csv')
+    edge_path = os.path.join(data_path, '0715_entity_dag_edges.csv')
 
-    nx.write_weighted_edgelist(G, graph_path)
-    map_df.to_csv(map_path, index=False, sep=' ')
+    nodes.to_csv(node_path, index=False)
+    edges.to_csv(edge_path, index=False)
 
 if __name__ == '__main__':
     main()
