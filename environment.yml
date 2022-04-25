@@ -9,11 +9,11 @@ dependencies:
   - pandas
   - matplotlib
   - numpy
+  - nltk
   - pyg
   - pytorch 
   - torchvision 
   - torchaudio 
-  - torchtext
   - cpuonly
   - transformers
   - pip
