@@ -12,9 +12,10 @@ import transformers
 import tqdm
 
 NUM_SENTENCES = 3
-MAX_TOKENS = 100
+MAX_TOKENS = 60
 MAX_TOP_PREDECESSORS = 3
 NUM_GENERATIONS = 3
+MIN_COMMON_ENTITIES = 3
 
 ContextTargetData = collections.namedtuple('ContextTargetData', ['target', 'context'])
 
@@ -23,7 +24,7 @@ def get_top_n_valid_predecessors(graph, node, n):
     predec_weights = []
     for predecessor in predecessors:
         num_entities = graph[predecessor][node]['entities']
-        if num_entities > 1:
+        if num_entities >= MIN_COMMON_ENTITIES:
             predec_weights.append((predecessor, num_entities))
 
     sorted_predecessors = [predec[0] for predec in sorted(predec_weights, key=lambda x: x[1], reverse=True)]
@@ -135,15 +136,7 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
             for idx, node_row in tqdm.tqdm(nodes_df.iterrows(), total=len(nodes_df)):
                 node_mapping[node_row['id']] = idx
 
-                node_text = node_row['title']
-                bert_tokens = bert_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
-                lm_tokens = lm_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
-
-                graph.add_node(idx, 
-                            bert_input_ids=bert_tokens.input_ids,
-                            bert_attention_mask=bert_tokens.attention_mask,
-                            lm_input_ids=lm_tokens.input_ids,
-                            lm_attention_mask=lm_tokens.attention_mask)
+                graph.add_node(idx, node_text=node_row['title'])
 
             # add edges from dataframe
             print(f"Loading edges into graph from {edge_file_name}")
@@ -163,7 +156,7 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
             # process network into torch compat shape
             print('Create context/target pairs from graph')
-            for node, tokens in tqdm.tqdm(graph.nodes(data=True), total=graph.number_of_nodes()):
+            for node, node_data in tqdm.tqdm(graph.nodes(data=True), total=graph.number_of_nodes()):
                 if graph.in_degree(node) == 0:
                     continue
 
@@ -175,17 +168,35 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
 
                 data = {}
 
-                data['target_input_ids'] = torch.tensor(tokens['bert_input_ids'], dtype=torch.long)
-                data['target_input_attention_mask'] = torch.tensor(tokens['bert_attention_mask'], dtype=torch.long)
+                node_text = node_data['node_text']
 
-                data['target_output_ids'] = torch.tensor(tokens['lm_input_ids'], dtype=torch.long)
-                data['target_output_attention_mask'] = torch.tensor(tokens['lm_attention_mask'], dtype=torch.long)
+                bert_tokens = bert_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
+                lm_tokens = lm_tokenizer(node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
 
-                data['decoder_input_ids'] = torch.tensor(graph.nodes[context_node]['lm_input_ids'])
-                data['decoder_attention_mask'] = torch.tensor(graph.nodes[context_node]['lm_attention_mask'])
+                data['target_input_ids'] = torch.tensor(bert_tokens.input_ids, dtype=torch.long)
+                data['target_input_attention_mask'] = torch.tensor(bert_tokens.attention_mask, dtype=torch.long)
 
-                data['conditioner_input_ids'] = torch.tensor(graph.nodes[context_node]['bert_input_ids'])
-                data['conditioner_attention_mask'] = torch.tensor(graph.nodes[context_node]['bert_attention_mask'])
+                data['target_output_ids'] = torch.tensor(lm_tokens.input_ids, dtype=torch.long)
+                data['target_output_attention_mask'] = torch.tensor(lm_tokens.attention_mask, dtype=torch.long)
+
+                context_text = graph.nodes[context_node]['node_text']
+
+                context_bert_tokens = bert_tokenizer(context_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
+                
+                data['conditioner_input_ids'] = torch.tensor(context_bert_tokens.input_ids)
+                data['conditioner_attention_mask'] = torch.tensor(context_bert_tokens.attention_mask)
+
+                context_text_with_stop = context_text + '. '
+                context_with_stop_lm_tokens = lm_tokenizer(context_text_with_stop, padding='max_length', truncation=True, max_length=MAX_TOKENS)
+
+                data['decoder_input_ids'] = torch.tensor(context_with_stop_lm_tokens.input_ids)
+                data['decoder_attention_mask'] = torch.tensor(context_with_stop_lm_tokens.attention_mask)
+
+                joined_text = context_text_with_stop + node_text
+                joined_lm_tokens = lm_tokenizer(joined_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
+
+                data['joined_input_ids'] = torch.tensor(joined_lm_tokens.input_ids)
+                data['joined_attention_mask'] = torch.tensor(joined_lm_tokens.attention_mask)
 
                 ancestors = get_n_gen_ancestors(graph, node, NUM_GENERATIONS, MAX_TOP_PREDECESSORS)
                 graph_context = nx.induced_subgraph(graph, ancestors).copy()
@@ -195,9 +206,11 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
                 node_attention_mask = np.zeros((num_nodes, MAX_TOKENS))
 
                 node_map = {}
-                for node_idx, (context_node, context_tokens) in enumerate(graph_context.nodes(data=True)):
-                    node_token_ids[node_idx, :] = context_tokens['bert_input_ids']
-                    node_attention_mask[node_idx, :] = context_tokens['bert_attention_mask']
+                for node_idx, (context_node, context_node_data) in enumerate(graph_context.nodes(data=True)):
+                    context_node_text = context_node_data['node_text']
+                    context_node_bert_tokens = bert_tokenizer(context_node_text, padding='max_length', truncation=True, max_length=MAX_TOKENS)
+                    node_token_ids[node_idx, :] = context_node_bert_tokens.input_ids
+                    node_attention_mask[node_idx, :] = context_node_bert_tokens.attention_mask
 
                     node_map[context_node] = node_idx
 
@@ -224,11 +237,11 @@ class NewsDataset(torch_geometric.data.InMemoryDataset):
         torch.save((data, slices), graph_data_save_path)
 
 
-def load_and_preprocess_dataset(model, dataset_name):
+def load_and_preprocess_dataset(model, dataset_name, lm_name):
     path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'data', dataset_name)
     graph_context = model == 'gcvae'
 
-    dataset = NewsDataset(path, dataset_name, graph_context=graph_context)
+    dataset = NewsDataset(path, dataset_name, graph_context=graph_context, lm_name=lm_name)
 
     train_size = int(0.8 * len(dataset))
     val_size = int(0.1 * len(dataset))
